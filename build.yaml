@@ -1,0 +1,16 @@
+name: "Meilisearch"
+guid: "a4b5c6d7-e8f9-4a5b-8c7d-9e0f1a2b3c4d"
+version: "1.0.0.0"
+targetAbi: "10.12.0.0"
+framework: "net10.0"
+overview: "Meilisearch search provider for Jellyfin"
+description: >
+  Integrates Meilisearch as a fast, typo-tolerant search engine for your Jellyfin library.
+  Features include real-time index synchronization with library changes and manual re-indexing.
+category: "Search"
+owner: "jellyfin"
+artifacts:
+  - "Jellyfin.Plugin.Meilisearch.dll"
+  - "Meilisearch.dll"
+changelog: >
+  Initial release with search provider, real-time sync, and reindex task.

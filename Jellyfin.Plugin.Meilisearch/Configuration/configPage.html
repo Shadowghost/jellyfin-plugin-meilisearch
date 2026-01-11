@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Meilisearch</title>
+</head>
+<body>
+    <div id="configPage" data-role="page" class="page type-interior pluginConfigurationPage configPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <h1>Meilisearch</h1>
+                <p>Configure the connection to your Meilisearch server for fast, typo-tolerant search.</p>
+                <form class="configForm">
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="meilisearchUrl" required label="Meilisearch URL" />
+                        <div class="fieldDescription">The URL of your Meilisearch server. Default: http://localhost:7700</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="password" id="apiKey" label="API Key (optional)" />
+                        <div class="fieldDescription">The API key for your Meilisearch server. Leave empty if no authentication is required.</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="indexName" required label="Index Name" />
+                        <div class="fieldDescription">The name of the Meilisearch index to use. Default: jellyfin</div>
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="enableRealTimeSync" />
+                        <span>Enable real-time synchronization</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Automatically update the search index when items are added, updated, or removed from your library.
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="minimumMatchScore" min="0" max="100" step="1" label="Minimum Match Score (0-100)" />
+                        <div class="fieldDescription">Results with a match score below this threshold will be filtered out. Set to 0 to include all results. Default: 50</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="syncBatchSize" min="1" step="1" label="Sync Batch Size" />
+                        <div class="fieldDescription">Maximum number of items per real-time sync flush. Default: 500</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="syncBatchDebounceMilliseconds" min="0" step="50" label="Sync Debounce (ms)" />
+                        <div class="fieldDescription">Maximum wait time in milliseconds before flushing a partial real-time sync batch. Default: 2000</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="reindexBatchSize" min="1" step="1" label="Reindex Batch Size" />
+                        <div class="fieldDescription">Number of items per reindex push. Default: 2000</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="reindexParallelism" min="1" step="1" label="Reindex Parallelism" />
+                        <div class="fieldDescription">Number of concurrent batches during reindex. Default: 2</div>
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="enableHealthMonitor" />
+                        <span>Enable background health monitor</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Periodically pings Meilisearch and automatically pauses real-time sync when the server is unreachable.
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="healthCheckIntervalSeconds" min="1" step="1" label="Health Check Interval (seconds)" />
+                        <div class="fieldDescription">Interval in seconds between background health checks. Default: 60</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label for="synonyms" style="display:block; margin-bottom: 0.25em;">Synonyms (one per line, format: term=alt1,alt2)</label>
+                        <textarea id="synonyms" rows="6" style="width: 100%; box-sizing: border-box; font-family: monospace;"></textarea>
+                        <div class="fieldDescription">Each line maps a term to comma-separated alternatives, e.g. <code>movie=film,picture</code>.</div>
+                    </div>
+                    <br />
+                    <div style="margin-bottom: 1em;">
+                        <button is="emby-button" type="button" id="testConnectionBtn" class="raised"><span>Test Connection</span></button>
+                        <span id="connectionStatus" style="margin-left: 1em;"></span>
+                    </div>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+                    </div>
+                </form>
+                <div style="margin-top: 2em;">
+                    <h2>Status</h2>
+                    <button is="emby-button" type="button" id="refreshStatusBtn" class="raised"><span>Refresh</span></button>
+                    <div id="statusContent" style="margin-top: 1em;">Loading…</div>
+                </div>
+                <div style="margin-top: 2em;">
+                    <h2>Reindex</h2>
+                    <p>To rebuild the search index, run the "Rebuild Meilisearch Index" scheduled task from the Scheduled Tasks page.</p>
+                </div>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var MeilisearchPluginConfig = {
+                pluginId: "a4b5c6d7-e8f9-4a5b-8c7d-9e0f1a2b3c4d"
+            };
+
+            function setNumericInput(id, value, fallback) {
+                var el = document.querySelector(id);
+                if (!el) {
+                    return;
+                }
+                el.value = (value !== null && value !== undefined && value !== '') ? value : fallback;
+                el.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+            }
+
+            function parseIntOrDefault(value, fallback) {
+                var n = parseInt(value, 10);
+                return isNaN(n) ? fallback : n;
+            }
+
+            function escapeHtml(s) {
+                return String(s)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function formatBytes(bytes) {
+                if (bytes === null || bytes === undefined) {
+                    return 'unknown';
+                }
+                var n = Number(bytes);
+                if (!isFinite(n) || n < 0) {
+                    return 'unknown';
+                }
+                var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                var idx = 0;
+                while (n >= 1024 && idx < units.length - 1) {
+                    n /= 1024;
+                    idx++;
+                }
+                return (idx === 0 ? n.toFixed(0) : n.toFixed(2)) + ' ' + units[idx];
+            }
+
+            function formatNumber(n) {
+                if (n === null || n === undefined) {
+                    return 'unknown';
+                }
+                try {
+                    return Number(n).toLocaleString();
+                } catch (e) {
+                    return String(n);
+                }
+            }
+
+            function renderStatus(stats) {
+                var lines = [];
+
+                var healthyColor = stats.isHealthy ? 'green' : 'red';
+                var healthyText = stats.isHealthy ? '✓ Healthy' : '✗ Unhealthy';
+                lines.push('<div><strong>Connection:</strong> <span style="color:' + healthyColor + ';">' + healthyText + '</span></div>');
+
+                var authColor = stats.isAuthenticated ? 'green' : 'red';
+                var authText = stats.isAuthenticated ? '✓ Yes' : '✗ No';
+                lines.push('<div><strong>Authenticated:</strong> <span style="color:' + authColor + ';">' + authText + '</span></div>');
+
+                lines.push('<div><strong>Documents:</strong> ' + escapeHtml(formatNumber(stats.documentCount)) + '</div>');
+
+                var indexing = (stats.isIndexing === null || stats.isIndexing === undefined) ? 'unknown' : (stats.isIndexing ? 'yes' : 'no');
+                lines.push('<div><strong>Currently indexing:</strong> ' + escapeHtml(indexing) + '</div>');
+
+                lines.push('<div><strong>Database size:</strong> ' + escapeHtml(formatBytes(stats.databaseSize)) + '</div>');
+
+                var last = stats.lastIncrementalReindexUtc ? escapeHtml(stats.lastIncrementalReindexUtc) : 'never';
+                lines.push('<div><strong>Last incremental sync:</strong> ' + last + '</div>');
+
+                if (stats.error) {
+                    lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(stats.error) + '</div>');
+                }
+
+                if (stats.fieldDistribution) {
+                    var entries = [];
+                    for (var k in stats.fieldDistribution) {
+                        if (Object.prototype.hasOwnProperty.call(stats.fieldDistribution, k)) {
+                            entries.push([k, stats.fieldDistribution[k]]);
+                        }
+                    }
+                    if (entries.length > 0) {
+                        entries.sort(function (a, b) { return b[1] - a[1]; });
+                        var top = entries.slice(0, 8);
+                        var items = top.map(function (e) {
+                            return '<li>' + escapeHtml(e[0]) + ': ' + escapeHtml(formatNumber(e[1])) + '</li>';
+                        }).join('');
+                        lines.push('<div style="margin-top: 0.5em;"><strong>Top indexed fields:</strong><ul>' + items + '</ul></div>');
+                    }
+                }
+
+                document.querySelector('#statusContent').innerHTML = lines.join('');
+            }
+
+            function refreshStatus() {
+                var container = document.querySelector('#statusContent');
+                if (!container) {
+                    return;
+                }
+                container.textContent = 'Loading…';
+                ApiClient.getJSON(ApiClient.getUrl('Plugins/Meilisearch/Stats'))
+                    .then(function (stats) {
+                        renderStatus(stats);
+                    })
+                    .catch(function (error) {
+                        var message = (error && error.message) ? error.message : 'Unknown error';
+                        container.innerHTML = '<span style="color:red;">Failed to load status: ' + escapeHtml(message) + '</span>';
+                    });
+            }
+
+            document.querySelector('.configPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                        var urlInput = document.querySelector('#meilisearchUrl');
+                        urlInput.value = config.MeilisearchUrl || 'http://localhost:7700';
+                        urlInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        var apiKeyInput = document.querySelector('#apiKey');
+                        apiKeyInput.value = config.ApiKey || '';
+                        apiKeyInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        var indexNameInput = document.querySelector('#indexName');
+                        indexNameInput.value = config.IndexName || 'jellyfin';
+                        indexNameInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        document.querySelector('#enableRealTimeSync').checked = config.EnableRealTimeSync !== false;
+
+                        var minScoreInput = document.querySelector('#minimumMatchScore');
+                        minScoreInput.value = (config.MinimumMatchScore !== null && config.MinimumMatchScore !== undefined) ? config.MinimumMatchScore : 50;
+                        minScoreInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        setNumericInput('#syncBatchSize', config.SyncBatchSize, 500);
+                        setNumericInput('#syncBatchDebounceMilliseconds', config.SyncBatchDebounceMilliseconds, 2000);
+                        setNumericInput('#reindexBatchSize', config.ReindexBatchSize, 2000);
+                        setNumericInput('#reindexParallelism', config.ReindexParallelism, 2);
+
+                        document.querySelector('#enableHealthMonitor').checked = config.EnableHealthMonitor !== false;
+
+                        setNumericInput('#healthCheckIntervalSeconds', config.HealthCheckIntervalSeconds, 60);
+
+                        var synonymsInput = document.querySelector('#synonyms');
+                        synonymsInput.value = config.Synonyms || '';
+
+                        Dashboard.hideLoadingMsg();
+                    });
+
+                    refreshStatus();
+                });
+
+            document.querySelector('.configForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                        config.MeilisearchUrl = document.querySelector('#meilisearchUrl').value;
+                        config.ApiKey = document.querySelector('#apiKey').value;
+                        config.IndexName = document.querySelector('#indexName').value;
+                        config.EnableRealTimeSync = document.querySelector('#enableRealTimeSync').checked;
+                        config.MinimumMatchScore = parseIntOrDefault(document.querySelector('#minimumMatchScore').value, 50);
+                        config.SyncBatchSize = parseIntOrDefault(document.querySelector('#syncBatchSize').value, 500);
+                        config.SyncBatchDebounceMilliseconds = parseIntOrDefault(document.querySelector('#syncBatchDebounceMilliseconds').value, 2000);
+                        config.ReindexBatchSize = parseIntOrDefault(document.querySelector('#reindexBatchSize').value, 2000);
+                        config.ReindexParallelism = parseIntOrDefault(document.querySelector('#reindexParallelism').value, 2);
+                        config.EnableHealthMonitor = document.querySelector('#enableHealthMonitor').checked;
+                        config.HealthCheckIntervalSeconds = parseIntOrDefault(document.querySelector('#healthCheckIntervalSeconds').value, 60);
+                        config.Synonyms = document.querySelector('#synonyms').value;
+
+                        ApiClient.updatePluginConfiguration(MeilisearchPluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+
+            document.querySelector('#testConnectionBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#connectionStatus');
+                    statusSpan.textContent = 'Testing...';
+                    statusSpan.style.color = '';
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/TestConnection'),
+                        dataType: 'json'
+                    })
+                        .then(function (response) {
+                            if (response && response.IsAuthenticated) {
+                                statusSpan.textContent = 'Connection successful!';
+                                statusSpan.style.color = 'green';
+                            } else if (response && response.IsHealthy) {
+                                statusSpan.textContent = 'Server reachable but API key invalid';
+                                statusSpan.style.color = 'orange';
+                            } else {
+                                var err = (response && response.Error) ? response.Error : 'unknown error';
+                                statusSpan.textContent = 'Connection failed: ' + err;
+                                statusSpan.style.color = 'red';
+                            }
+                        })
+                        .catch(function (error) {
+                            var message = (error && error.message) ? error.message : (error && error.statusText) ? error.statusText : 'request error';
+                            statusSpan.textContent = 'Connection failed: ' + message;
+                            statusSpan.style.color = 'red';
+                        });
+                });
+
+            document.querySelector('#refreshStatusBtn')
+                .addEventListener('click', function () {
+                    refreshStatus();
+                });
+        </script>
+    </div>
+</body>
+</html>
