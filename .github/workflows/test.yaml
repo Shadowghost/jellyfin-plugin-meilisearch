@@ -1,0 +1,44 @@
+name: 'Test Plugin'
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - unstable
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches:
+      - master
+      - main
+      - unstable
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NUGET_AUTH_TOKEN: ${{ secrets.JELLYFIN_NUGET_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --no-restore --verbosity normal

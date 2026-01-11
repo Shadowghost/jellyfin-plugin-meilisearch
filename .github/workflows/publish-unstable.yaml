@@ -1,0 +1,176 @@
+name: 'Publish (Unstable) Plugin'
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches:
+      - unstable
+  workflow_dispatch:
+
+jobs:
+  publish-unstable:
+    runs-on: ubuntu-latest
+    env:
+      NUGET_AUTH_TOKEN: ${{ secrets.JELLYFIN_NUGET_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install JPRM
+        run: pip install jprm
+
+      - name: Generate unstable version and changelog
+        id: version
+        run: |
+          # YYYY.M.D.HHMM (UTC). HHMM ensures multiple pushes in the same day produce
+          # distinct, monotonically-increasing versions so Jellyfin sees them as updates.
+          DATE=$(date -u +%Y.%m.%d)
+          TIME=$(date -u +%H%M)
+          SHA_SHORT=$(git rev-parse --short=7 HEAD)
+          VERSION="${DATE}.${TIME}"
+          # Tag is unique per build so older zips referenced from earlier manifest
+          # entries stay downloadable.
+          TAG="unstable-${VERSION}-${SHA_SHORT}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Generate changelog of commits on unstable that aren't on main
+          CHANGELOG=$(git log --oneline --no-merges origin/main..HEAD 2>/dev/null || echo "Unable to determine changes.")
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            echo "$CHANGELOG"
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin with JPRM
+        run: |
+          mkdir -p artifacts
+          jprm --verbosity=debug plugin build . --version="${{ steps.version.outputs.version }}" --output=artifacts
+
+      - name: Create unstable pre-release
+        run: |
+          cat > /tmp/release-notes.md << 'NOTES_HEADER'
+          **Unstable build** from commit ${{ github.sha }}.
+
+          Install via repository manifest URL:
+          ```
+          https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/metadata/unstable/manifest.json
+          ```
+
+          ### Changes since main
+          NOTES_HEADER
+
+          echo '${{ steps.version.outputs.changelog }}' >> /tmp/release-notes.md
+
+          gh release create "${{ steps.version.outputs.tag }}" artifacts/*.zip \
+            --title "Unstable ${{ steps.version.outputs.version }} (${{ steps.version.outputs.sha_short }})" \
+            --notes-file /tmp/release-notes.md \
+            --prerelease \
+            --target "${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune old unstable releases
+        # Keep the same number of unstable-* releases that the manifest retains
+        # (10) so cached manifest entries never outlive their assets. Any older
+        # release+tag is removed. Runs BEFORE the manifest update so that step
+        # can sync the manifest to the post-prune set of tags in one pass.
+        run: |
+          KEEP=10
+          mapfile -t TAGS < <(gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("unstable-")))] | sort_by(.createdAt) | reverse | .[].tagName')
+
+          if [ "${#TAGS[@]}" -le "$KEEP" ]; then
+            echo "Found ${#TAGS[@]} unstable releases; nothing to prune."
+            exit 0
+          fi
+
+          echo "Found ${#TAGS[@]} unstable releases; pruning $((${#TAGS[@]} - KEEP))."
+          for tag in "${TAGS[@]:$KEEP}"; do
+            echo "Deleting release+tag: ${tag}"
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update unstable manifest on metadata branch
+        run: |
+          REPO="Shadowghost/jellyfin-plugin-meilisearch"
+
+          # Clone just the metadata branch into a temporary directory
+          git clone --single-branch --branch metadata \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.git" \
+            metadata-repo 2>/dev/null
+
+          # Add each built artifact to the manifest
+          for zip in artifacts/*.zip; do
+            FILENAME=$(basename "$zip")
+            URL="https://github.com/${REPO}/releases/download/${{ steps.version.outputs.tag }}/${FILENAME}"
+            jprm repo add --plugin-url="${URL}" metadata-repo/unstable/manifest.json "$zip"
+          done
+
+          # Snapshot the set of unstable-* release tags that currently exist on
+          # GitHub (after the prune step above). Manifest entries whose download
+          # URL points at a tag NOT in this set are stale - drop them so the
+          # manifest never advertises 404s.
+          gh release list --limit 200 --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("unstable-")))] | .[].tagName' \
+            > /tmp/unstable-tags.txt
+
+          cd metadata-repo
+          python3 - <<'PY'
+          import json
+          import re
+
+          with open('/tmp/unstable-tags.txt') as f:
+              existing_tags = {line.strip() for line in f if line.strip()}
+
+          tag_pattern = re.compile(r'/releases/download/([^/]+)/')
+
+          with open('unstable/manifest.json', 'r') as f:
+              data = json.load(f)
+
+          for plugin in data:
+              kept = []
+              dropped = 0
+              for v in plugin.get('versions', []):
+                  url = v.get('sourceUrl', '')
+                  m = tag_pattern.search(url)
+                  # Leave non-GitHub-release URLs alone rather than risk dropping a
+                  # legitimate externally-hosted asset.
+                  if not m or m.group(1) in existing_tags:
+                      kept.append(v)
+                  else:
+                      dropped += 1
+              if dropped:
+                  print(f"Dropped {dropped} stale entry/entries from {plugin.get('name', '?')}")
+              # Trim to the 10 most recent entries (manifest is newest-first).
+              plugin['versions'] = kept[:10]
+
+          with open('unstable/manifest.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add unstable/manifest.json
+          git diff --cached --quiet || git commit -m "Update unstable manifest (${{ steps.version.outputs.version }}-${{ steps.version.outputs.sha_short }})"
+          git push origin metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
