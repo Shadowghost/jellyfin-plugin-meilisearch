@@ -1,0 +1,79 @@
+name: 'Publish Plugin'
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types:
+      - released
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NUGET_AUTH_TOKEN: ${{ secrets.JELLYFIN_NUGET_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install JPRM
+        run: pip install jprm
+
+      - name: Extract version from release tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.release.tag_name }}}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin with JPRM
+        run: |
+          mkdir -p artifacts
+          jprm --verbosity=debug plugin build . --version="${{ steps.version.outputs.version }}" --output=artifacts
+
+      - name: Upload artifacts to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: artifacts/*.zip
+          file_glob: true
+          tag: ${{ steps.version.outputs.tag }}
+          overwrite: true
+
+      - name: Update stable manifest on metadata branch
+        run: |
+          REPO="Shadowghost/jellyfin-plugin-meilisearch"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Clone just the metadata branch into a temporary directory
+          git clone --single-branch --branch metadata \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.git" \
+            metadata-repo 2>/dev/null
+
+          # Add each built artifact to the manifest
+          for zip in artifacts/*.zip; do
+            FILENAME=$(basename "$zip")
+            URL="https://github.com/${REPO}/releases/download/${TAG}/${FILENAME}"
+            jprm repo add --plugin-url="${URL}" metadata-repo/stable/manifest.json "$zip"
+          done
+
+          # Commit and push
+          cd metadata-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stable/manifest.json
+          git diff --cached --quiet || git commit -m "Update stable manifest for ${TAG}"
+          git push origin metadata

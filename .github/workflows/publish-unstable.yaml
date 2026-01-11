@@ -1,0 +1,119 @@
+name: 'Publish (Unstable) Plugin'
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches:
+      - unstable
+  workflow_dispatch:
+
+jobs:
+  publish-unstable:
+    runs-on: ubuntu-latest
+    env:
+      NUGET_AUTH_TOKEN: ${{ secrets.JELLYFIN_NUGET_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install JPRM
+        run: pip install jprm
+
+      - name: Generate unstable version and changelog
+        id: version
+        run: |
+          DATE=$(date -u +%Y.%m.%d)
+          SHA_SHORT=$(git rev-parse --short=7 HEAD)
+          echo "version=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+          # Generate changelog of commits on unstable that aren't on main
+          CHANGELOG=$(git log --oneline --no-merges origin/main..HEAD 2>/dev/null || echo "Unable to determine changes.")
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            echo "$CHANGELOG"
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin with JPRM
+        run: |
+          mkdir -p artifacts
+          jprm --verbosity=debug plugin build . --version="${{ steps.version.outputs.version }}" --output=artifacts
+
+      - name: Delete existing unstable release
+        run: gh release delete unstable-latest --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create unstable pre-release
+        run: |
+          cat > /tmp/release-notes.md << 'NOTES_HEADER'
+          **Unstable build** from commit ${{ github.sha }}.
+
+          Install via repository manifest URL:
+          ```
+          https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/metadata/unstable/manifest.json
+          ```
+
+          ### Changes since main
+          NOTES_HEADER
+
+          echo '${{ steps.version.outputs.changelog }}' >> /tmp/release-notes.md
+
+          gh release create unstable-latest artifacts/*.zip \
+            --title "Unstable ${{ steps.version.outputs.version }} (${{ steps.version.outputs.sha_short }})" \
+            --notes-file /tmp/release-notes.md \
+            --prerelease \
+            --target "${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update unstable manifest on metadata branch
+        run: |
+          REPO="Shadowghost/jellyfin-plugin-meilisearch"
+
+          # Clone just the metadata branch into a temporary directory
+          git clone --single-branch --branch metadata \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.git" \
+            metadata-repo 2>/dev/null
+
+          # Add each built artifact to the manifest
+          for zip in artifacts/*.zip; do
+            FILENAME=$(basename "$zip")
+            URL="https://github.com/${REPO}/releases/download/unstable-latest/${FILENAME}"
+            jprm repo add --plugin-url="${URL}" metadata-repo/unstable/manifest.json "$zip"
+          done
+
+          # Trim unstable manifest to last 10 versions
+          cd metadata-repo
+          python3 -c "
+          import json
+          with open('unstable/manifest.json', 'r') as f:
+              data = json.load(f)
+          for plugin in data:
+              if 'versions' in plugin and len(plugin['versions']) > 10:
+                  plugin['versions'] = plugin['versions'][:10]
+          with open('unstable/manifest.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          "
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add unstable/manifest.json
+          git diff --cached --quiet || git commit -m "Update unstable manifest (${{ steps.version.outputs.version }}-${{ steps.version.outputs.sha_short }})"
+          git push origin metadata

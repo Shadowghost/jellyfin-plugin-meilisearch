@@ -1,0 +1,26 @@
+name: 'Create/Update Release Draft & Release Bump PR'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - build.yaml
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - update-prep-command
+
+jobs:
+  changelog:
+    uses: jellyfin/jellyfin-meta-plugins/.github/workflows/changelog.yaml@master
+    with:
+      repository-name: Shadowghost/jellyfin-plugin-meilisearch
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}

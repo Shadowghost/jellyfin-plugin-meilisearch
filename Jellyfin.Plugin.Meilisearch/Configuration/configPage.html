@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Meilisearch</title>
+</head>
+<body>
+    <div id="configPage" data-role="page" class="page type-interior pluginConfigurationPage configPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <h1>Meilisearch</h1>
+                <p>Configure the connection to your Meilisearch server for fast, typo-tolerant search.</p>
+                <form class="configForm">
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="meilisearchUrl" required label="Meilisearch URL" />
+                        <div class="fieldDescription">The URL of your Meilisearch server. Default: http://localhost:7700</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="password" id="apiKey" label="API Key (optional)" />
+                        <div class="fieldDescription">The API key for your Meilisearch server. Leave empty if no authentication is required.</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="indexName" required label="Index Name" />
+                        <div class="fieldDescription">The name of the Meilisearch index to use. Default: jellyfin</div>
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="enableRealTimeSync" />
+                        <span>Enable real-time synchronization</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Automatically update the search index when items are added, updated, or removed from your library.
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="minimumMatchScore" min="0" max="100" step="1" label="Minimum Match Score (0-100)" />
+                        <div class="fieldDescription">Results with a match score below this threshold will be filtered out. Set to 0 to include all results. Default: 0</div>
+                    </div>
+                    <br />
+                    <div style="margin-bottom: 1em;">
+                        <button is="emby-button" type="button" id="testConnectionBtn" class="raised"><span>Test Connection</span></button>
+                        <span id="connectionStatus" style="margin-left: 1em;"></span>
+                    </div>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+                    </div>
+                </form>
+                <div style="margin-top: 2em;">
+                    <h2>Reindex</h2>
+                    <p>To rebuild the search index, run the "Rebuild Meilisearch Index" scheduled task from the Scheduled Tasks page.</p>
+                </div>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var MeilisearchPluginConfig = {
+                pluginId: "a4b5c6d7-e8f9-4a5b-8c7d-9e0f1a2b3c4d"
+            };
+
+            document.querySelector('.configPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                        var urlInput = document.querySelector('#meilisearchUrl');
+                        urlInput.value = config.MeilisearchUrl || 'http://localhost:7700';
+                        urlInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        var apiKeyInput = document.querySelector('#apiKey');
+                        apiKeyInput.value = config.ApiKey || '';
+                        apiKeyInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        var indexNameInput = document.querySelector('#indexName');
+                        indexNameInput.value = config.IndexName || 'jellyfin';
+                        indexNameInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        document.querySelector('#enableRealTimeSync').checked = config.EnableRealTimeSync !== false;
+
+                        var minScoreInput = document.querySelector('#minimumMatchScore');
+                        minScoreInput.value = config.MinimumMatchScore || 0;
+                        minScoreInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('.configForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                        config.MeilisearchUrl = document.querySelector('#meilisearchUrl').value;
+                        config.ApiKey = document.querySelector('#apiKey').value;
+                        config.IndexName = document.querySelector('#indexName').value;
+                        config.EnableRealTimeSync = document.querySelector('#enableRealTimeSync').checked;
+                        config.MinimumMatchScore = parseInt(document.querySelector('#minimumMatchScore').value, 10) || 0;
+
+                        ApiClient.updatePluginConfiguration(MeilisearchPluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+
+            document.querySelector('#testConnectionBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#connectionStatus');
+                    statusSpan.textContent = 'Testing...';
+                    statusSpan.style.color = '';
+
+                    var url = document.querySelector('#meilisearchUrl').value;
+                    var apiKey = document.querySelector('#apiKey').value;
+
+                    // Build test URL
+                    var testUrl = url.replace(/\/$/, '') + '/health';
+                    var headers = {};
+                    if (apiKey) {
+                        headers['Authorization'] = 'Bearer ' + apiKey;
+                    }
+
+                    fetch(testUrl, { headers: headers })
+                        .then(function (response) {
+                            if (response.ok) {
+                                statusSpan.textContent = 'Connection successful!';
+                                statusSpan.style.color = 'green';
+                            } else {
+                                statusSpan.textContent = 'Connection failed: ' + response.status + ' ' + response.statusText;
+                                statusSpan.style.color = 'red';
+                            }
+                        })
+                        .catch(function (error) {
+                            statusSpan.textContent = 'Connection failed: ' + error.message;
+                            statusSpan.style.color = 'red';
+                        });
+                });
+        </script>
+    </div>
+</body>
+</html>
