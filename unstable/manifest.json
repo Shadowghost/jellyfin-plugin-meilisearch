@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "guid": "a4b5c6d7-e8f9-4a5b-8c7d-9e0f1a2b3c4d",
+    "name": "Meilisearch",
+    "description": "Integrates Meilisearch as a fast, typo-tolerant search engine for your Jellyfin library. Features include real-time index synchronization with library changes and manual re-indexing.\n",
+    "overview": "Meilisearch search provider for Jellyfin",
+    "owner": "jellyfin",
+    "category": "Search",
+    "versions": [
+      {
+        "version": "2026.6.8.837",
+        "changelog": "Initial release with search provider, real-time sync, and reindex task.\n",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.06.08.0837-632608a/meilisearch_2026.6.8.837.zip",
+        "checksum": "b61b21f7548e879c9ab2d1a4a000bd7a",
+        "timestamp": "2026-06-08T08:37:33Z"
+      }
+    ]
+  }
+]
