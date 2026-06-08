@@ -4,7 +4,7 @@
 
 A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as an external search provider, enabling fast, typo-tolerant search across your media library.
 
-> **Important**: This plugin requires a modified version of Jellyfin with external search provider support. You must have the `search-external` branch of [Shadowghost/jellyfin](https://github.com/Shadowghost/jellyfin) available locally and Jellyfin built with that branch.
+> **Important**: This plugin requires Jellyfin with external search provider support, added in [jellyfin/jellyfin#16121](https://github.com/jellyfin/jellyfin/pull/16121). This is included in Jellyfin unstable/nightly builds and the upcoming 12.0.0 release.
 
 ## Features
 
@@ -23,18 +23,12 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 
 ### Jellyfin with External Search Support
 
-This plugin requires the `search-external` branch from [Shadowghost/jellyfin](https://github.com/Shadowghost/jellyfin) which adds the `ISearchProvider` interface for external search providers.
+This plugin requires Jellyfin with external search provider support, which adds the `IExternalSearchProvider` interface. This was merged into Jellyfin mainline in [jellyfin/jellyfin#16121](https://github.com/jellyfin/jellyfin/pull/16121) and is available in:
 
-You must clone and build Jellyfin from this branch:
+- Jellyfin unstable/nightly builds, and
+- the upcoming Jellyfin 12.0.0 stable release.
 
-```bash
-git clone https://github.com/Shadowghost/jellyfin.git
-cd jellyfin
-git checkout search-external
-dotnet build
-```
-
-The plugin expects the Jellyfin source to be available at `../../jellyfin/` relative to this repository (i.e., both repositories should be in the same parent directory).
+No custom Jellyfin build is required — the plugin compiles against the official `Jellyfin.Controller` NuGet packages (see [Building](#building)).
 
 ### Meilisearch Server
 
@@ -48,19 +42,21 @@ docker run -d -p 7700:7700 -v $(pwd)/meili_data:/meili_data getmeili/meilisearch
 ### Build Requirements
 
 - .NET 10.0 SDK
-- Jellyfin 10.12.0 (from the search-external branch)
+- Jellyfin 12.0.0 or newer (unstable/nightly until 12.0.0 is released)
 
 ## Building
 
+The plugin builds against the official Jellyfin NuGet packages. The unstable `12.0.0-*`
+packages are published to Jellyfin's GitHub Packages feed (configured in `nuget.config`),
+which requires authentication. Export a [GitHub personal access token](https://github.com/settings/tokens)
+with the `read:packages` scope as `NUGET_AUTH_TOKEN` before building:
+
 ```bash
-# Clone this repository next to your jellyfin checkout
-# Directory structure should be:
-#   parent/
-#     jellyfin/          (search-external branch)
-#     jellyfin-plugin-meilisearch/
+export NUGET_AUTH_TOKEN=<your-github-token>
+
+cd jellyfin-plugin-meilisearch
 
 # Build the plugin
-cd jellyfin-plugin-meilisearch
 dotnet build
 
 # Build in Release mode
@@ -72,12 +68,27 @@ dotnet build -c Release
 
 ## Installation
 
-1. Build the plugin as described above
+### From the plugin repository (recommended)
+
+1. In Jellyfin, go to **Dashboard > Plugins > Repositories**.
+2. Add a new repository:
+   - **Name**: `Meilisearch`
+   - **URL**: `https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/metadata/unstable/manifest.json`
+3. Go to **Catalog**, find **Meilisearch** under the **Search** category, and install it.
+4. Restart Jellyfin.
+
+> Only the unstable feed is published for now. A stable feed will be available at
+> `https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/metadata/stable/manifest.json`
+> once a stable release is cut.
+
+### Manual installation
+
+1. Build the plugin as described above.
 2. Copy `Jellyfin.Plugin.Meilisearch.dll` to your Jellyfin plugins directory:
    - Linux: `~/.local/share/jellyfin/plugins/Meilisearch/`
    - Windows: `%APPDATA%\jellyfin\plugins\Meilisearch\`
    - Docker: `/config/plugins/Meilisearch/`
-3. Restart Jellyfin
+3. Restart Jellyfin.
 
 ## Configuration
 
@@ -155,7 +166,7 @@ The plugin indexes the following item types:
 ## Architecture
 
 - **MeilisearchClientWrapper** - Singleton client managing Meilisearch connections, cached index handle, and settings application
-- **MeilisearchSearchProvider** - Implements `ISearchProvider` for Jellyfin integration (Jellyfin core handles user/parental access filtering on results)
+- **MeilisearchSearchProvider** - Implements `IExternalSearchProvider` for Jellyfin integration (Jellyfin core handles user/parental access filtering on results)
 - **MeilisearchIndexService** - Hosted service running a bounded, debounced, coalescing sync queue with pause/resume support
 - **SyncQueuePersistence** - Persists pending sync ops across plugin restarts
 - **MeilisearchHealthMonitor** - Hosted service that periodically pings Meilisearch and pauses sync when unreachable
