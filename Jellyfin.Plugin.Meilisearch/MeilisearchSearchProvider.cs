@@ -157,7 +157,7 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
 
     /// <summary>
     /// Builds the non-type portion of the Meilisearch filter (parent scope, plus type exclusions when no
-    /// item types were resolved). Type-scoped filters are applied by the caller — either as a single
+    /// item types were resolved). Type-scoped filters are applied by the caller - either as a single
     /// <c>itemType = …</c> clause or via per-type sub-queries in a multi-search.
     /// </summary>
     private static string? BuildNonTypeFilter(SearchProviderQuery query, bool hasResolvedTypes)

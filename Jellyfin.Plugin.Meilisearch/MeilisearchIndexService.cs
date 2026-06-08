@@ -731,7 +731,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             if (op.Item is null)
             {
                 // Upsert without an item reference (e.g. from a persisted restore where the item is missing);
-                // skip it — caller is responsible for resolving.
+                // skip it - caller is responsible for resolving.
                 continue;
             }
 
@@ -759,7 +759,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
             if (docsToIndex.Count > 0 || idsToRemove.Count > 0)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Flushed Meilisearch sync batch: {UpsertCount} upserts, {RemoveCount} removes",
                     docsToIndex.Count,
                     idsToRemove.Count);

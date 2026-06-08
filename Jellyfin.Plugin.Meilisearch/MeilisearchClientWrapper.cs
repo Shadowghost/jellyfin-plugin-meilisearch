@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -70,26 +71,31 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-            var searchParams = new SearchQuery
-            {
-                Limit = limit,
-                ShowRankingScore = true,
-                MatchingStrategy = "last",
-                Filter = filter
-            };
+            return await ExecuteWithReconnectRetryAsync<IReadOnlyList<(string Id, double Score)>>(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    var searchParams = new SearchQuery
+                    {
+                        Limit = limit,
+                        ShowRankingScore = true,
+                        MatchingStrategy = "last",
+                        Filter = filter
+                    };
 
-            var minScore = Configuration.MinimumMatchScore;
-            if (minScore is not null && minScore > 0)
-            {
-                searchParams.RankingScoreThreshold = minScore / 100m;
-            }
+                    var minScore = Configuration.MinimumMatchScore;
+                    if (minScore is not null && minScore > 0)
+                    {
+                        searchParams.RankingScoreThreshold = minScore / 100m;
+                    }
 
-            var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, cancellationToken).ConfigureAwait(false);
+                    var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
 
-            return results.Hits
-                .Select(hit => (hit.Id, hit.RankingScore ?? 0.0))
-                .ToList();
+                    return results.Hits
+                        .Select(hit => (hit.Id, hit.RankingScore ?? 0.0))
+                        .ToList();
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -123,86 +129,91 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            // Ensure the index exists and settings are applied before issuing the multi-search.
-            await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-            var client = GetClient();
-            var indexUid = Configuration.IndexName;
-
-            // Per-type quota: give each type a fair share
-            var perTypeLimit = Math.Max(20, totalLimit / types.Count);
-            perTypeLimit = Math.Min(perTypeLimit, totalLimit);
-
-            var minScore = Configuration.MinimumMatchScore;
-            decimal? threshold = (minScore is not null && minScore > 0) ? minScore.Value / 100m : null;
-
-            var queries = new List<SearchQuery>(types.Count);
-            foreach (var type in types)
-            {
-                var typeFilter = $"itemType = \"{type}\"";
-                var combinedFilter = string.IsNullOrEmpty(extraFilter)
-                    ? typeFilter
-                    : $"{typeFilter} AND {extraFilter}";
-
-                var sq = new SearchQuery
+            return await ExecuteWithReconnectRetryAsync<IReadOnlyList<(string Id, double Score)>>(
+                async ct =>
                 {
-                    IndexUid = indexUid,
-                    Q = searchTerm,
-                    Limit = perTypeLimit,
-                    Filter = combinedFilter,
-                    ShowRankingScore = true,
-                    MatchingStrategy = "last"
-                };
+                    // Ensure the index exists and settings are applied before issuing the multi-search.
+                    await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    var client = GetClient();
+                    var indexUid = Configuration.IndexName;
 
-                if (threshold.HasValue)
-                {
-                    sq.RankingScoreThreshold = threshold;
-                }
+                    // Per-type quota: give each type a fair share
+                    var perTypeLimit = Math.Max(20, totalLimit / types.Count);
+                    perTypeLimit = Math.Min(perTypeLimit, totalLimit);
 
-                queries.Add(sq);
-            }
+                    var minScore = Configuration.MinimumMatchScore;
+                    decimal? threshold = (minScore is not null && minScore > 0) ? minScore.Value / 100m : null;
 
-            var multiQuery = new MultiSearchQuery { Queries = queries };
-            var result = await client.MultiSearchAsync(multiQuery, cancellationToken).ConfigureAwait(false);
-
-            var merged = new List<(string Id, double Score)>(types.Count * perTypeLimit);
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var subResult in result.Results)
-            {
-                foreach (var hit in subResult.Hits)
-                {
-                    var root = hit.RootElement;
-                    if (!root.TryGetProperty("id", out var idElement))
+                    var queries = new List<SearchQuery>(types.Count);
+                    foreach (var type in types)
                     {
-                        continue;
+                        var typeFilter = $"itemType = \"{type}\"";
+                        var combinedFilter = string.IsNullOrEmpty(extraFilter)
+                            ? typeFilter
+                            : $"{typeFilter} AND {extraFilter}";
+
+                        var sq = new SearchQuery
+                        {
+                            IndexUid = indexUid,
+                            Q = searchTerm,
+                            Limit = perTypeLimit,
+                            Filter = combinedFilter,
+                            ShowRankingScore = true,
+                            MatchingStrategy = "last"
+                        };
+
+                        if (threshold.HasValue)
+                        {
+                            sq.RankingScoreThreshold = threshold;
+                        }
+
+                        queries.Add(sq);
                     }
 
-                    var id = idElement.GetString();
-                    if (string.IsNullOrEmpty(id) || !seen.Add(id))
+                    var multiQuery = new MultiSearchQuery { Queries = queries };
+                    var result = await client.MultiSearchAsync(multiQuery, ct).ConfigureAwait(false);
+
+                    var merged = new List<(string Id, double Score)>(types.Count * perTypeLimit);
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var subResult in result.Results)
                     {
-                        continue;
+                        foreach (var hit in subResult.Hits)
+                        {
+                            var root = hit.RootElement;
+                            if (!root.TryGetProperty("id", out var idElement))
+                            {
+                                continue;
+                            }
+
+                            var id = idElement.GetString();
+                            if (string.IsNullOrEmpty(id) || !seen.Add(id))
+                            {
+                                continue;
+                            }
+
+                            double score = 0;
+                            if (root.TryGetProperty("_rankingScore", out var scoreElement)
+                                && scoreElement.ValueKind == JsonValueKind.Number)
+                            {
+                                score = scoreElement.GetDouble();
+                            }
+
+                            merged.Add((id, score));
+                        }
                     }
 
-                    double score = 0;
-                    if (root.TryGetProperty("_rankingScore", out var scoreElement)
-                        && scoreElement.ValueKind == JsonValueKind.Number)
+                    // If we collected more than the caller asked for, keep the highest-scoring globally.
+                    if (merged.Count > totalLimit)
                     {
-                        score = scoreElement.GetDouble();
+                        return merged
+                            .OrderByDescending(m => m.Score)
+                            .Take(totalLimit)
+                            .ToList();
                     }
 
-                    merged.Add((id, score));
-                }
-            }
-
-            // If we collected more than the caller asked for, keep the highest-scoring globally.
-            if (merged.Count > totalLimit)
-            {
-                return merged
-                    .OrderByDescending(m => m.Score)
-                    .Take(totalLimit)
-                    .ToList();
-            }
-
-            return merged;
+                    return merged;
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -226,11 +237,16 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-            var task = await index.AddDocumentsAsync([document], cancellationToken: cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Indexed document {Id} ({Name})", document.Id, document.Name);
+            return await ExecuteWithReconnectRetryAsync<int?>(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    var task = await index.AddDocumentsAsync([document], cancellationToken: ct).ConfigureAwait(false);
+                    _logger.LogDebug("Indexed document {Id} ({Name})", document.Id, document.Name);
 
-            return task.TaskUid;
+                    return task.TaskUid;
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -254,12 +270,17 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
             var docList = documents.ToList();
-            var task = await index.AddDocumentsAsync(docList, cancellationToken: cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Indexed {Count} documents", docList.Count);
+            return await ExecuteWithReconnectRetryAsync<int?>(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    var task = await index.AddDocumentsAsync(docList, cancellationToken: ct).ConfigureAwait(false);
+                    _logger.LogDebug("Indexed {Count} documents", docList.Count);
 
-            return task.TaskUid;
+                    return task.TaskUid;
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -283,9 +304,14 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-            await index.DeleteOneDocumentAsync(documentId, cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Removed document {Id}", documentId);
+            await ExecuteWithReconnectRetryAsync(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    await index.DeleteOneDocumentAsync(documentId, ct).ConfigureAwait(false);
+                    _logger.LogDebug("Removed document {Id}", documentId);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -308,10 +334,15 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
             var idList = documentIds.ToList();
-            await index.DeleteDocumentsAsync(idList, cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Removed {Count} documents", idList.Count);
+            await ExecuteWithReconnectRetryAsync(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    await index.DeleteDocumentsAsync(idList, ct).ConfigureAwait(false);
+                    _logger.LogDebug("Removed {Count} documents", idList.Count);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -331,26 +362,31 @@ public class MeilisearchClientWrapper : IDisposable
             return;
         }
 
-        var client = GetClient();
-        var indexName = Configuration.IndexName;
+        await ExecuteWithReconnectRetryAsync(
+            async ct =>
+            {
+                var client = GetClient();
+                var indexName = Configuration.IndexName;
 
-        try
-        {
-            _logger.LogInformation("Deleting Meilisearch index {IndexName}", indexName);
-            var deleteTask = await client.DeleteIndexAsync(indexName, cancellationToken).ConfigureAwait(false);
-            await client.WaitForTaskAsync(deleteTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken).ConfigureAwait(false);
-        }
-        catch (MeilisearchApiError ex) when (ex.Code == "index_not_found")
-        {
-            _logger.LogDebug("Index {IndexName} does not exist, nothing to delete", indexName);
-        }
+                try
+                {
+                    _logger.LogInformation("Deleting Meilisearch index {IndexName}", indexName);
+                    var deleteTask = await client.DeleteIndexAsync(indexName, ct).ConfigureAwait(false);
+                    await client.WaitForTaskAsync(deleteTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, ct).ConfigureAwait(false);
+                }
+                catch (MeilisearchApiError ex) when (ex.Code == "index_not_found")
+                {
+                    _logger.LogDebug("Index {IndexName} does not exist, nothing to delete", indexName);
+                }
 
-        // Invalidate caches so the next access re-applies settings.
-        InvalidateIndexCache();
+                // Invalidate caches so the next access re-applies settings.
+                InvalidateIndexCache();
 
-        // Recreate the index.
-        await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Recreated Meilisearch index {IndexName}", indexName);
+                // Recreate the index.
+                await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                _logger.LogInformation("Recreated Meilisearch index {IndexName}", indexName);
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -376,20 +412,15 @@ public class MeilisearchClientWrapper : IDisposable
             return new MeilisearchHealth(false, false, "Not configured");
         }
 
-        MeilisearchClient client;
         try
         {
-            client = GetClient();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to create Meilisearch client during health check");
-            return new MeilisearchHealth(false, false, ex.Message);
-        }
-
-        try
-        {
-            await client.HealthAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteWithReconnectRetryAsync(
+                async ct =>
+                {
+                    // GetClient() inside the operation ensures the retry runs against the recreated client.
+                    await GetClient().HealthAsync(ct).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -404,7 +435,12 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            await client.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteWithReconnectRetryAsync(
+                async ct =>
+                {
+                    await GetClient().GetStatsAsync(ct).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
             return new MeilisearchHealth(true, true, null);
         }
         catch (Exception ex)
@@ -428,8 +464,13 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var index = await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
-            return await index.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithReconnectRetryAsync<IndexStats?>(
+                async ct =>
+                {
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    return await index.GetStatsAsync(ct).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -453,9 +494,14 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            var client = GetClient();
-            var resource = await client.WaitForTaskAsync(taskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken).ConfigureAwait(false);
-            return resource.Status == TaskInfoStatus.Succeeded;
+            return await ExecuteWithReconnectRetryAsync<bool>(
+                async ct =>
+                {
+                    var client = GetClient();
+                    var resource = await client.WaitForTaskAsync(taskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, ct).ConfigureAwait(false);
+                    return resource.Status == TaskInfoStatus.Succeeded;
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -498,6 +544,89 @@ public class MeilisearchClientWrapper : IDisposable
             _clientLock.Release();
         }
     }
+
+    /// <summary>
+    /// Discards the cached client and index handles so the next access recreates them. Recreating the
+    /// <see cref="MeilisearchClient"/> rebuilds its underlying <see cref="HttpClient"/>, which clears the pooled
+    /// TCP connection and cached DNS entry. This is required to recover after the Meilisearch server is restarted
+    /// or its container is recreated with a new address, without having to restart Jellyfin.
+    /// </summary>
+    private void ResetClient()
+    {
+        _clientLock.Wait();
+        try
+        {
+            _client = null;
+            _currentUrl = null;
+            _currentApiKey = null;
+            _cachedIndex = null;
+            _cachedIndexKey = null;
+            _settingsAppliedKey = null;
+            _logger.LogInformation("Reset Meilisearch client; it will be recreated on next use");
+        }
+        finally
+        {
+            _clientLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Executes a Meilisearch operation, transparently recreating the client and retrying once when a transient
+    /// communication failure is detected. The operation must (re-)acquire the client/index internally so that the
+    /// retry runs against the freshly created client.
+    /// </summary>
+    /// <typeparam name="T">The operation result type.</typeparam>
+    /// <param name="operation">The operation to execute.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The operation result.</returns>
+    private async Task<T> ExecuteWithReconnectRetryAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await operation(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsReconnectable(ex) && !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Meilisearch communication failure; recreating client and retrying once");
+            ResetClient();
+            return await operation(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Executes a Meilisearch operation that returns no value, applying the same reconnect-and-retry behaviour as
+    /// <see cref="ExecuteWithReconnectRetryAsync{T}"/>.
+    /// </summary>
+    /// <param name="operation">The operation to execute.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A task representing the operation.</returns>
+    private Task ExecuteWithReconnectRetryAsync(Func<CancellationToken, Task> operation, CancellationToken cancellationToken)
+        => ExecuteWithReconnectRetryAsync<object?>(
+            async ct =>
+            {
+                await operation(ct).ConfigureAwait(false);
+                return null;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Determines whether an exception represents a transient communication failure that warrants recreating the
+    /// client and retrying. A cancellation requested by the caller is deliberately not treated as reconnectable;
+    /// only an <see cref="HttpClient"/>-originated timeout (a <see cref="TaskCanceledException"/> wrapping a
+    /// <see cref="TimeoutException"/>) is.
+    /// </summary>
+    /// <param name="ex">The exception to inspect.</param>
+    /// <returns><c>true</c> if the operation should be retried against a fresh client.</returns>
+    private static bool IsReconnectable(Exception ex)
+        => ex switch
+        {
+            MeilisearchCommunicationError => true,
+            MeilisearchTimeoutError => true,
+            HttpRequestException => true,
+            TimeoutException => true,
+            TaskCanceledException tce => tce.InnerException is TimeoutException,
+            _ => false
+        };
 
     /// <summary>
     /// Builds a cache key composed of the URL, API key and index name.
@@ -709,7 +838,7 @@ public class MeilisearchClientWrapper : IDisposable
         // Configure distinct attribute to deduplicate results by document id.
         await index.UpdateDistinctAttributeAsync("id", cancellationToken).ConfigureAwait(false);
 
-        // Restrict displayed attributes — the search provider only consumes id + _rankingScore.
+        // Restrict displayed attributes - the search provider only consumes id + _rankingScore.
         await index.UpdateDisplayedAttributesAsync(["id"], cancellationToken).ConfigureAwait(false);
 
         // Apply synonyms from configuration.

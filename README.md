@@ -10,7 +10,7 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 
 - Fast full-text search powered by Meilisearch
 - Typo-tolerant search (finds "Strager Things" when you meant "Stranger Things")
-- People-aware search — find titles by actor or director name
+- People-aware search - find titles by actor or director name
 - Real-time index synchronization with a debounced, coalesced, persisted queue
 - Scheduled tasks for full and incremental reindexing
 - Background health monitor that pauses sync when Meilisearch is unreachable
