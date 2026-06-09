@@ -104,6 +104,19 @@
                 return isNaN(n) ? fallback : n;
             }
 
+            // Jellyfin serializes API responses in PascalCase, but be tolerant of
+            // camelCase too so the status panel works regardless of serializer config.
+            function pick(obj, name) {
+                if (!obj) {
+                    return undefined;
+                }
+                if (obj[name] !== undefined) {
+                    return obj[name];
+                }
+                var camel = name.charAt(0).toLowerCase() + name.slice(1);
+                return obj[camel];
+            }
+
             function escapeHtml(s) {
                 return String(s)
                     .replace(/&/g, '&amp;')
@@ -144,33 +157,39 @@
             function renderStatus(stats) {
                 var lines = [];
 
-                var healthyColor = stats.isHealthy ? 'green' : 'red';
-                var healthyText = stats.isHealthy ? '✓ Healthy' : '✗ Unhealthy';
+                var isHealthy = pick(stats, 'IsHealthy');
+                var healthyColor = isHealthy ? 'green' : 'red';
+                var healthyText = isHealthy ? '✓ Healthy' : '✗ Unhealthy';
                 lines.push('<div><strong>Connection:</strong> <span style="color:' + healthyColor + ';">' + healthyText + '</span></div>');
 
-                var authColor = stats.isAuthenticated ? 'green' : 'red';
-                var authText = stats.isAuthenticated ? '✓ Yes' : '✗ No';
+                var isAuthenticated = pick(stats, 'IsAuthenticated');
+                var authColor = isAuthenticated ? 'green' : 'red';
+                var authText = isAuthenticated ? '✓ Yes' : '✗ No';
                 lines.push('<div><strong>Authenticated:</strong> <span style="color:' + authColor + ';">' + authText + '</span></div>');
 
-                lines.push('<div><strong>Documents:</strong> ' + escapeHtml(formatNumber(stats.documentCount)) + '</div>');
+                lines.push('<div><strong>Documents:</strong> ' + escapeHtml(formatNumber(pick(stats, 'DocumentCount'))) + '</div>');
 
-                var indexing = (stats.isIndexing === null || stats.isIndexing === undefined) ? 'unknown' : (stats.isIndexing ? 'yes' : 'no');
+                var isIndexing = pick(stats, 'IsIndexing');
+                var indexing = (isIndexing === null || isIndexing === undefined) ? 'unknown' : (isIndexing ? 'yes' : 'no');
                 lines.push('<div><strong>Currently indexing:</strong> ' + escapeHtml(indexing) + '</div>');
 
-                lines.push('<div><strong>Database size:</strong> ' + escapeHtml(formatBytes(stats.databaseSize)) + '</div>');
+                lines.push('<div><strong>Database size:</strong> ' + escapeHtml(formatBytes(pick(stats, 'DatabaseSize'))) + '</div>');
 
-                var last = stats.lastIncrementalReindexUtc ? escapeHtml(stats.lastIncrementalReindexUtc) : 'never';
+                var lastReindex = pick(stats, 'LastIncrementalReindexUtc');
+                var last = lastReindex ? escapeHtml(lastReindex) : 'never';
                 lines.push('<div><strong>Last incremental sync:</strong> ' + last + '</div>');
 
-                if (stats.error) {
-                    lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(stats.error) + '</div>');
+                var error = pick(stats, 'Error');
+                if (error) {
+                    lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(error) + '</div>');
                 }
 
-                if (stats.fieldDistribution) {
+                var fieldDistribution = pick(stats, 'FieldDistribution');
+                if (fieldDistribution) {
                     var entries = [];
-                    for (var k in stats.fieldDistribution) {
-                        if (Object.prototype.hasOwnProperty.call(stats.fieldDistribution, k)) {
-                            entries.push([k, stats.fieldDistribution[k]]);
+                    for (var k in fieldDistribution) {
+                        if (Object.prototype.hasOwnProperty.call(fieldDistribution, k)) {
+                            entries.push([k, fieldDistribution[k]]);
                         }
                     }
                     if (entries.length > 0) {
@@ -279,14 +298,14 @@
                         dataType: 'json'
                     })
                         .then(function (response) {
-                            if (response && response.IsAuthenticated) {
+                            if (pick(response, 'IsAuthenticated')) {
                                 statusSpan.textContent = 'Connection successful!';
                                 statusSpan.style.color = 'green';
-                            } else if (response && response.IsHealthy) {
+                            } else if (pick(response, 'IsHealthy')) {
                                 statusSpan.textContent = 'Server reachable but API key invalid';
                                 statusSpan.style.color = 'orange';
                             } else {
-                                var err = (response && response.Error) ? response.Error : 'unknown error';
+                                var err = pick(response, 'Error') || 'unknown error';
                                 statusSpan.textContent = 'Connection failed: ' + err;
                                 statusSpan.style.color = 'red';
                             }
