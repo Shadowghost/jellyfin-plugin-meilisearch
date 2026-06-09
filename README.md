@@ -36,8 +36,23 @@ You need a running Meilisearch instance. The easiest way to get started:
 
 ```bash
 # Using Docker
-docker run -d -p 7700:7700 -v $(pwd)/meili_data:/meili_data getmeili/meilisearch:latest
+docker run -d -p 7700:7700 -v $(pwd)/meili_data:/meili_data \
+  -e MEILI_ENV=production \
+  -e MEILI_MASTER_KEY=<a-long-random-key> \
+  -e MEILI_NO_ANALYTICS=true \
+  getmeili/meilisearch:latest
 ```
+
+> **Why these settings?** See the [Meilisearch configuration reference](https://www.meilisearch.com/docs/resources/self_hosting/configuration/reference).
+>
+> - `MEILI_ENV` defaults to `development`, which disables authentication and serves the
+>   bundled search preview UI. Set it to [`production`](https://www.meilisearch.com/docs/resources/self_hosting/configuration/reference#environment)
+>   so the API key is enforced and the preview is disabled.
+> - `MEILI_MASTER_KEY` is [required in production](https://www.meilisearch.com/docs/resources/self_hosting/configuration/reference#master-key).
+>   Generate a random value of at least 16 bytes and use it (or a derived API key) as the
+>   **API Key** in the plugin configuration below.
+> - Meilisearch collects [anonymous analytics by default](https://www.meilisearch.com/docs/resources/self_hosting/configuration/reference#disable-analytics)
+>   (opt-out). `MEILI_NO_ANALYTICS=true` disables it.
 
 ### Build Requirements
 
