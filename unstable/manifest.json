@@ -8,6 +8,14 @@
     "category": "Search",
     "versions": [
       {
+        "version": "2026.7.24.547",
+        "changelog": "Initial release with search provider, real-time sync, and reindex task.\n",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.07.24.0547-98657a9/meilisearch_2026.7.24.547.zip",
+        "checksum": "181dcc5408db9df8dc909f4e7ccbb5e8",
+        "timestamp": "2026-07-24T05:47:55Z"
+      },
+      {
         "version": "2026.7.24.543",
         "changelog": "Initial release with search provider, real-time sync, and reindex task.\n",
         "targetAbi": "12.0.0.0",
