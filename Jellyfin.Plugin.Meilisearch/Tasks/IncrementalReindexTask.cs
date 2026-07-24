@@ -5,6 +5,8 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
@@ -149,6 +151,8 @@ public class IncrementalReindexTask : IScheduledTask
         var errorCount = 0;
         var batchNumber = 0;
         var startIndex = 0;
+        var consecutiveFetchFailures = 0;
+        const int MaxConsecutiveFetchFailures = 5;
 
         while (true)
         {
@@ -162,6 +166,7 @@ public class IncrementalReindexTask : IScheduledTask
                     Recursive = true,
                     IncludeItemTypes = ReindexTask.IndexableItemTypes,
                     MinDateLastSaved = since,
+                    OrderBy = ReindexTask.StableOrder,
                     StartIndex = startIndex,
                     Limit = batchSize
                 };
@@ -176,8 +181,22 @@ public class IncrementalReindexTask : IScheduledTask
                     startIndex);
                 errorCount += batchSize;
                 startIndex += batchSize;
+
+                // Guard against an unbounded loop: if fetching keeps throwing we would otherwise
+                // advance startIndex forever without ever hitting the items.Count == 0 exit.
+                if (++consecutiveFetchFailures >= MaxConsecutiveFetchFailures)
+                {
+                    _logger.LogError(
+                        "Aborting incremental sync after {FailureCount} consecutive fetch failures (last at offset {StartIndex})",
+                        consecutiveFetchFailures,
+                        startIndex);
+                    break;
+                }
+
                 continue;
             }
+
+            consecutiveFetchFailures = 0;
 
             if (items.Count == 0)
             {

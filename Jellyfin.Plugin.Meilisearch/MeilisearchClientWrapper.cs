@@ -27,9 +27,10 @@ public class MeilisearchClientWrapper : IDisposable
     private MeilisearchClient? _client;
     private string? _currentUrl;
     private string? _currentApiKey;
-    private global::Meilisearch.Index? _cachedIndex;
-    private string? _cachedIndexKey;
-    private string? _settingsAppliedKey;
+
+    private volatile global::Meilisearch.Index? _cachedIndex;
+    private volatile string? _cachedIndexKey;
+    private volatile string? _settingsAppliedKey;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MeilisearchClientWrapper"/> class.
@@ -202,13 +203,15 @@ public class MeilisearchClientWrapper : IDisposable
                         }
                     }
 
-                    // If we collected more than the caller asked for, keep the highest-scoring globally.
+                    merged.Sort((a, b) =>
+                    {
+                        var byScore = b.Score.CompareTo(a.Score);
+                        return byScore != 0 ? byScore : string.CompareOrdinal(a.Id, b.Id);
+                    });
+
                     if (merged.Count > totalLimit)
                     {
-                        return merged
-                            .OrderByDescending(m => m.Score)
-                            .Take(totalLimit)
-                            .ToList();
+                        merged.RemoveRange(totalLimit, merged.Count - totalLimit);
                     }
 
                     return merged;
@@ -842,7 +845,13 @@ public class MeilisearchClientWrapper : IDisposable
         await index.UpdateDisplayedAttributesAsync(["id"], cancellationToken).ConfigureAwait(false);
 
         // Apply synonyms from configuration.
-        await index.UpdateSynonymsAsync(ParseSynonyms(Configuration.Synonyms), cancellationToken).ConfigureAwait(false);
+        var lastSettingsTask = await index.UpdateSynonymsAsync(ParseSynonyms(Configuration.Synonyms), cancellationToken).ConfigureAwait(false);
+        if (isNewIndex)
+        {
+            await GetClient()
+                .WaitForTaskAsync(lastSettingsTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -881,6 +890,7 @@ public class MeilisearchClientWrapper : IDisposable
             var values = line[(equalsIdx + 1)..]
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Where(static v => v.Length > 0)
+                .Select(static v => v.ToLower(CultureInfo.InvariantCulture))
                 .ToArray();
 
             if (values.Length == 0)
