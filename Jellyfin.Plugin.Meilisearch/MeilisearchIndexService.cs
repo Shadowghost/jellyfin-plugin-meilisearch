@@ -53,7 +53,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
     private CancellationTokenSource? _workerCts;
     private Task? _workerTask;
-    private int _paused;
+    private int _pauseCount;
     private List<PersistedSyncOp>? _leftoverOps;
     private bool _disposed;
 
@@ -164,7 +164,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         await _pauseLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Interlocked.Exchange(ref _paused, 1);
+            _pauseCount++;
         }
         finally
         {
@@ -175,16 +175,20 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Resumes real-time sync after a previous <see cref="PauseAsync"/> call.
+    /// Resumes real-time sync after a previous <see cref="PauseAsync"/> call. Sync only actually
+    /// resumes once the outstanding pause count returns to zero.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task that completes once the paused flag has been cleared.</returns>
+    /// <returns>A task that completes once the pause count has been decremented.</returns>
     public async Task ResumeAsync(CancellationToken cancellationToken)
     {
         await _pauseLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Interlocked.Exchange(ref _paused, 0);
+            if (_pauseCount > 0)
+            {
+                _pauseCount--;
+            }
         }
         finally
         {
@@ -251,13 +255,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return false;
         }
 
-        // Skip folders that aren't meaningful content.
-        if (item is Folder && item is not MusicAlbum && item is not Series)
-        {
-            return false;
-        }
-
-        // Only index specific item types that are meaningful search results.
         // Season is excluded as users typically search for Series, not individual seasons.
         return item.GetBaseItemKind() switch
         {
@@ -541,7 +538,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return;
         }
 
-        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _paused) != 0)
+        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _pauseCount) != 0)
         {
             return;
         }
@@ -569,7 +566,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return;
         }
 
-        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _paused) != 0)
+        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _pauseCount) != 0)
         {
             return;
         }
