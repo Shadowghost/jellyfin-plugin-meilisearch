@@ -8,7 +8,6 @@
     <AnalysisMode>AllEnabledByDefault</AnalysisMode>
   </PropertyGroup>
 
-  <!-- Reference local Jellyfin projects -->
   <ItemGroup>
     <PackageReference Include="Jellyfin.Controller" Version="12.0.0-*" />
     <PackageReference Include="Jellyfin.Model" Version="12.0.0-*" />

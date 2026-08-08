@@ -55,13 +55,13 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
         }
 
         var totalLimit = query.Limit ?? 100;
-        var effectiveTypes = ResolveEffectiveTypes(query);
-        var nonTypeFilter = BuildNonTypeFilter(query, hasResolvedTypes: effectiveTypes.Count > 0);
+        var effectiveTypes = query.IncludeItemTypes;
+        var nonTypeFilter = BuildNonTypeFilter(query);
 
         IReadOnlyList<(string Id, double Score)> results;
         try
         {
-            if (effectiveTypes.Count > 1)
+            if (effectiveTypes.Length > 1)
             {
                 // Per-type quota search: each item type gets its own slice of the result budget so that
                 // strongly-matching documents in one type (e.g. songs matching an artist name) cannot
@@ -76,7 +76,7 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
             else
             {
                 string? filter = nonTypeFilter;
-                if (effectiveTypes.Count == 1)
+                if (effectiveTypes.Length == 1)
                 {
                     var typeFilter = $"itemType = \"{effectiveTypes[0]}\"";
                     filter = string.IsNullOrEmpty(filter) ? typeFilter : $"{typeFilter} AND {filter}";
@@ -119,81 +119,45 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
     }
 
     /// <summary>
-    /// Resolves the effective set of item types for the query by combining <see cref="SearchProviderQuery.IncludeItemTypes"/>
-    /// with item types derived from <see cref="SearchProviderQuery.MediaTypes"/>, then subtracting
-    /// <see cref="SearchProviderQuery.ExcludeItemTypes"/>. Returns an empty list when the caller did not
-    /// constrain item types at all (in which case the search runs across all types).
-    /// </summary>
-    private static IReadOnlyList<BaseItemKind> ResolveEffectiveTypes(SearchProviderQuery query)
-    {
-        var types = new List<BaseItemKind>();
-
-        foreach (var kind in query.IncludeItemTypes)
-        {
-            if (!types.Contains(kind))
-            {
-                types.Add(kind);
-            }
-        }
-
-        foreach (var mediaType in query.MediaTypes)
-        {
-            foreach (var kind in MapMediaTypeToItemTypes(mediaType))
-            {
-                if (!types.Contains(kind))
-                {
-                    types.Add(kind);
-                }
-            }
-        }
-
-        if (types.Count > 0 && query.ExcludeItemTypes.Length > 0)
-        {
-            types.RemoveAll(t => query.ExcludeItemTypes.Contains(t));
-        }
-
-        return types;
-    }
-
-    /// <summary>
-    /// Builds the non-type portion of the Meilisearch filter (parent scope, plus type exclusions when no
-    /// item types were resolved). Type-scoped filters are applied by the caller - either as a single
+    /// Builds the non-type portion of the Meilisearch filter: parent scope, media types, and type
+    /// exclusions. Item-type filters are applied by the caller - either as a single
     /// <c>itemType = …</c> clause or via per-type sub-queries in a multi-search.
     /// </summary>
-    private static string? BuildNonTypeFilter(SearchProviderQuery query, bool hasResolvedTypes)
+    private static string? BuildNonTypeFilter(SearchProviderQuery query)
     {
         var filters = new List<string>();
 
+        // ParentId scopes to the whole subtree, not just direct children, so match against the
+        // indexed ancestor chain. Filtering on parentId would drop everything nested more than one
+        // level below the requested folder - every episode in a TV library, for instance.
         if (query.ParentId.HasValue && query.ParentId.Value != Guid.Empty)
         {
-            filters.Add($"parentId = \"{query.ParentId.Value:N}\"");
+            filters.Add($"ancestorIds = \"{query.ParentId.Value:N}\"");
         }
 
-        // Exclusions are normally folded into the resolved type list. When no include/media types
-        // were supplied we couldn't subtract them, so emit explicit `!=` clauses to honor the request.
-        if (!hasResolvedTypes && query.ExcludeItemTypes.Length > 0)
+        // Media types are an additional constraint alongside the item-type filter, never an
+        // alternative to it.
+        if (query.MediaTypes.Length > 0)
         {
-            foreach (var excludeType in query.ExcludeItemTypes)
+            var mediaTypeClauses = query.MediaTypes
+                .Distinct()
+                .Select(mediaType => $"mediaType = \"{mediaType}\"")
+                .ToList();
+
+            filters.Add(mediaTypeClauses.Count == 1
+                ? mediaTypeClauses[0]
+                : $"({string.Join(" OR ", mediaTypeClauses)})");
+        }
+
+        // Exclusions only apply when the caller did not request specific item types.
+        if (query.IncludeItemTypes.Length == 0 && query.ExcludeItemTypes.Length > 0)
+        {
+            foreach (var excludeType in query.ExcludeItemTypes.Distinct())
             {
                 filters.Add($"itemType != \"{excludeType}\"");
             }
         }
 
         return filters.Count == 0 ? null : string.Join(" AND ", filters);
-    }
-
-    /// <summary>
-    /// Maps a media type to corresponding item types.
-    /// </summary>
-    private static BaseItemKind[] MapMediaTypeToItemTypes(MediaType mediaType)
-    {
-        return mediaType switch
-        {
-            MediaType.Video => [BaseItemKind.Movie, BaseItemKind.Episode, BaseItemKind.Video, BaseItemKind.MusicVideo],
-            MediaType.Audio => [BaseItemKind.Audio, BaseItemKind.MusicAlbum, BaseItemKind.MusicArtist],
-            MediaType.Photo => [BaseItemKind.Photo],
-            MediaType.Book => [BaseItemKind.Book, BaseItemKind.AudioBook],
-            _ => []
-        };
     }
 }

@@ -21,6 +21,7 @@ public class IncrementalReindexTask : IScheduledTask
 {
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
+    private readonly MeilisearchIndexService _indexService;
     private readonly ILogger<IncrementalReindexTask> _logger;
 
     /// <summary>
@@ -28,14 +29,17 @@ public class IncrementalReindexTask : IScheduledTask
     /// </summary>
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="client">The Meilisearch client wrapper.</param>
+    /// <param name="indexService">The index service used to pause real-time sync during the sweep.</param>
     /// <param name="logger">The logger.</param>
     public IncrementalReindexTask(
         ILibraryManager libraryManager,
         MeilisearchClientWrapper client,
+        MeilisearchIndexService indexService,
         ILogger<IncrementalReindexTask> logger)
     {
         _libraryManager = libraryManager;
         _client = client;
+        _indexService = indexService;
         _logger = logger;
     }
 
@@ -78,7 +82,24 @@ public class IncrementalReindexTask : IScheduledTask
 
         try
         {
-            await ExecuteCoreAsync(progress, cancellationToken).ConfigureAwait(false);
+            // Hold real-time writes for the duration of the sweep.
+            await _indexService.PauseAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await ExecuteCoreAsync(progress, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                try
+                {
+                    await _indexService.ResumeAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error resuming real-time sync after incremental sync");
+                }
+            }
         }
         finally
         {
@@ -125,21 +146,26 @@ public class IncrementalReindexTask : IScheduledTask
             batchSize,
             parallelism);
 
-        var totalCount = 0;
+        // Snapshot the id set and page over that. See ReindexTask for why offset pagination over a
+        // live library is unsafe here.
+        IReadOnlyList<Guid> itemIds;
         try
         {
-            totalCount = _libraryManager.GetCount(new InternalItemsQuery
+            itemIds = _libraryManager.GetItemIds(new InternalItemsQuery
             {
                 Recursive = true,
                 IncludeItemTypes = ReindexTask.IndexableItemTypes,
                 MinDateLastSaved = since,
             });
-            _logger.LogInformation("Found {TotalCount} modified items to sync", totalCount);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to get item count; progress will be reported as a fraction of work observed so far");
+            _logger.LogError(ex, "Failed to enumerate modified items; skipping this incremental sync");
+            return;
         }
+
+        var totalCount = itemIds.Count;
+        _logger.LogInformation("Found {TotalCount} modified items to sync", totalCount);
 
         var taskUids = new ConcurrentBag<int>();
         using var semaphore = new SemaphoreSlim(parallelism, parallelism);
@@ -152,26 +178,19 @@ public class IncrementalReindexTask : IScheduledTask
         var batchNumber = 0;
         var startIndex = 0;
         var consecutiveFetchFailures = 0;
+        var abortedEarly = false;
         const int MaxConsecutiveFetchFailures = 5;
 
-        while (true)
+        while (startIndex < totalCount)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            var idChunk = ReindexTask.BuildChunk(itemIds, startIndex, batchSize);
 
             IReadOnlyList<BaseItem> items;
             try
             {
-                var pageQuery = new InternalItemsQuery
-                {
-                    Recursive = true,
-                    IncludeItemTypes = ReindexTask.IndexableItemTypes,
-                    MinDateLastSaved = since,
-                    OrderBy = ReindexTask.StableOrder,
-                    StartIndex = startIndex,
-                    Limit = batchSize
-                };
-
-                items = _libraryManager.GetItemList(pageQuery);
+                items = _libraryManager.GetItemList(new InternalItemsQuery { ItemIds = idChunk });
             }
             catch (Exception ex)
             {
@@ -179,17 +198,16 @@ public class IncrementalReindexTask : IScheduledTask
                     ex,
                     "Error fetching items at offset {StartIndex}, skipping batch",
                     startIndex);
-                errorCount += batchSize;
+                errorCount += idChunk.Length;
                 startIndex += batchSize;
 
-                // Guard against an unbounded loop: if fetching keeps throwing we would otherwise
-                // advance startIndex forever without ever hitting the items.Count == 0 exit.
                 if (++consecutiveFetchFailures >= MaxConsecutiveFetchFailures)
                 {
                     _logger.LogError(
                         "Aborting incremental sync after {FailureCount} consecutive fetch failures (last at offset {StartIndex})",
                         consecutiveFetchFailures,
                         startIndex);
+                    abortedEarly = true;
                     break;
                 }
 
@@ -197,11 +215,6 @@ public class IncrementalReindexTask : IScheduledTask
             }
 
             consecutiveFetchFailures = 0;
-
-            if (items.Count == 0)
-            {
-                break;
-            }
 
             // Pre-fetch all people for this page in a single DB query (avoids F2's N+1).
             var peopleEligibleIds = items
@@ -263,18 +276,12 @@ public class IncrementalReindexTask : IScheduledTask
                     cancellationToken));
             }
 
-            double progressPercent;
-            if (totalCount > 0)
-            {
-                var fraction = Math.Min(1d, (double)processedCount / totalCount);
-                progressPercent = fraction * 95d;
-            }
-            else
-            {
-                progressPercent = 95d - (90d / (1d + (processedCount / 1_000d)));
-            }
+            startIndex += batchSize;
 
-            progressPercent = Math.Min(progressPercent, 95d);
+            // Measured against the snapshot position rather than the item count, so items deleted
+            // since the snapshot don't stall progress short of the end.
+            var fraction = Math.Min(1d, (double)Math.Min(startIndex, totalCount) / totalCount);
+            var progressPercent = Math.Min(fraction * 95d, 95d);
             progress.Report(progressPercent);
 
             _logger.LogInformation(
@@ -284,13 +291,6 @@ public class IncrementalReindexTask : IScheduledTask
                 skippedCount,
                 errorCount,
                 progressPercent.ToString("F1", CultureInfo.InvariantCulture));
-
-            if (items.Count < batchSize)
-            {
-                break;
-            }
-
-            startIndex += batchSize;
         }
 
         await Task.WhenAll(inFlight).ConfigureAwait(false);
@@ -315,9 +315,15 @@ public class IncrementalReindexTask : IScheduledTask
                 taskUids.Count);
         }
 
-        // Persist the run-start timestamp only after a successful sweep.
+        // Advance the watermark only when the sweep actually covered everything it set out to.
         var plugin = Plugin.Instance;
-        if (plugin is not null)
+        if (abortedEarly || taskFailures > 0)
+        {
+            _logger.LogWarning(
+                "Incremental sync did not complete cleanly; leaving the watermark at {Since:O} so the next run retries the same window",
+                since);
+        }
+        else if (plugin is not null)
         {
             plugin.Configuration.LastIncrementalReindexUtc = runStart;
             plugin.SaveConfiguration();
@@ -325,12 +331,12 @@ public class IncrementalReindexTask : IScheduledTask
 
         progress.Report(100);
         _logger.LogInformation(
-            "Incremental Meilisearch sync complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, {ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks). Next run will pick up changes since {RunStart:O}",
+            "Incremental Meilisearch sync complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, {ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks). Next run will pick up changes since {NextSince:O}",
             indexedCount,
             skippedCount,
             errorCount,
             batchNumber,
             taskUids.Count,
-            runStart);
+            abortedEarly || taskFailures > 0 ? since : runStart);
     }
 }

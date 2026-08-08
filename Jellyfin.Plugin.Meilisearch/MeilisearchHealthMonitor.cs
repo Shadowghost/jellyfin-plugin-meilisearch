@@ -137,25 +137,22 @@ public class MeilisearchHealthMonitor : IHostedService, IDisposable
 #pragma warning restore CA1031
     }
 
+    /// <summary>
+    /// Pauses sync while Meilisearch is unreachable and resumes once it returns.
+    /// </summary>
     private async Task HandleHealthTransitionAsync(MeilisearchHealth health, CancellationToken cancellationToken)
     {
-        if (_lastSeenHealthy is null)
-        {
-            _lastSeenHealthy = health.IsHealthy;
-            if (!health.IsHealthy)
-            {
-                _logger.LogWarning("Meilisearch unhealthy: {Error}, pausing real-time sync", health.Error);
-                await _indexService.PauseAsync(cancellationToken).ConfigureAwait(false);
-            }
+        // Treat the first observation as a transition from healthy, so an server that is already
+        // down when the monitor starts still pauses sync.
+        var wasHealthy = _lastSeenHealthy ?? true;
 
-            return;
-        }
-
-        var wasHealthy = _lastSeenHealthy.Value;
         if (wasHealthy && !health.IsHealthy)
         {
             _logger.LogWarning("Meilisearch unhealthy: {Error}, pausing real-time sync", health.Error);
             await _indexService.PauseAsync(cancellationToken).ConfigureAwait(false);
+
+            // Only recorded once the pause actually took effect. Recording it first would leave the
+            // pause count short by one if the call above threw, and sync would never resume.
             _lastSeenHealthy = false;
         }
         else if (!wasHealthy && health.IsHealthy)
@@ -163,6 +160,10 @@ public class MeilisearchHealthMonitor : IHostedService, IDisposable
             _logger.LogInformation("Meilisearch recovered, resuming real-time sync");
             await _indexService.ResumeAsync(cancellationToken).ConfigureAwait(false);
             _lastSeenHealthy = true;
+        }
+        else
+        {
+            _lastSeenHealthy = health.IsHealthy;
         }
     }
 
