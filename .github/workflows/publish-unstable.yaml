@@ -57,6 +57,11 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Point plugin image at the unstable branch
+        run: |
+          sed -i 's|/refs/heads/main/images/|/refs/heads/unstable/images/|' build.yaml
+          grep imageUrl build.yaml
+
       - name: Build plugin with JPRM
         run: |
           mkdir -p artifacts

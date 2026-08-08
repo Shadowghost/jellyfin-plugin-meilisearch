@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <radialGradient id="bg" cx="0.32" cy="0.28" r="0.95">
+      <stop offset="0" stop-color="#2f2f2f"/>
+      <stop offset="1" stop-color="#111111"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00A4DC"/>
+      <stop offset="1" stop-color="#AA5CC3"/>
+    </linearGradient>
+    <clipPath id="lens">
+      <circle cx="250" cy="210" r="147"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+
+  <!-- Magnifying glass over search results, left third -->
+  <g transform="translate(180,275)">
+    <!-- Speed lines: typo-tolerant, instant results -->
+    <g stroke="#ffffff" stroke-opacity="0.45" stroke-width="18" stroke-linecap="round">
+      <line x1="0" y1="140" x2="76" y2="140"/>
+      <line x1="-16" y1="210" x2="60" y2="210"/>
+      <line x1="0" y1="280" x2="76" y2="280"/>
+    </g>
+
+    <!-- Lens tint + result rows -->
+    <g clip-path="url(#lens)">
+      <circle cx="250" cy="210" r="147" fill="url(#accent)" fill-opacity="0.16"/>
+      <g fill="url(#accent)">
+        <rect x="152" y="146" width="196" height="28" rx="14"/>
+        <rect x="152" y="196" width="140" height="28" rx="14"/>
+        <rect x="152" y="246" width="172" height="28" rx="14"/>
+      </g>
+    </g>
+
+    <!-- Handle -->
+    <line x1="362" y1="322" x2="500" y2="460" stroke="#ffffff" stroke-width="48" stroke-linecap="round"/>
+
+    <!-- Ring -->
+    <circle cx="250" cy="210" r="165" fill="none" stroke="#ffffff" stroke-width="36"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g font-family="'Segoe UI',Helvetica,Arial,sans-serif" font-weight="800">
+    <text x="790" y="536" font-size="172" letter-spacing="1" fill="#ffffff">Meilisearch</text>
+    <text x="794" y="656" font-size="88" letter-spacing="1" fill="#ffffff" fill-opacity="0.55">Search Provider</text>
+  </g>
+</svg>

@@ -9,6 +9,7 @@ description: >
   Features include real-time index synchronization with library changes and manual re-indexing.
 category: "Search"
 owner: "jellyfin"
+imageUrl: "https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/refs/heads/main/images/jellyfin-plugin-meilisearch.png"
 artifacts:
   - "Jellyfin.Plugin.Meilisearch.dll"
   - "Meilisearch.dll"
