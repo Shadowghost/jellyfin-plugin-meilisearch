@@ -47,20 +47,6 @@ public class ReindexTask : IScheduledTask
         BaseItemKind.Video
     ];
 
-    /// <summary>
-    /// Stable ordering applied to every paged library query.
-    /// <para>
-    /// Offset pagination (<c>StartIndex</c>/<c>Limit</c>) requires a deterministic ORDER BY,
-    /// otherwise SQLite may return rows in a different order per batch - silently skipping or
-    /// double-indexing items across page boundaries - and EF logs a "row limiting operator
-    /// without OrderBy" warning.
-    /// </para>
-    /// </summary>
-    internal static readonly (ItemSortBy OrderBy, SortOrder SortOrder)[] StableOrder =
-    [
-        (ItemSortBy.SortName, SortOrder.Ascending)
-    ];
-
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
     private readonly MeilisearchIndexService _indexService;
@@ -102,6 +88,27 @@ public class ReindexTask : IScheduledTask
     {
         // No default triggers - manual execution only
         yield break;
+    }
+
+    /// <summary>
+    /// Copies one page of ids out of the snapshot.
+    /// </summary>
+    /// <param name="itemIds">The full id snapshot.</param>
+    /// <param name="startIndex">Index of the first id in this page.</param>
+    /// <param name="batchSize">Maximum number of ids in this page.</param>
+    /// <returns>The ids for this page.</returns>
+    internal static Guid[] BuildChunk(IReadOnlyList<Guid> itemIds, int startIndex, int batchSize)
+    {
+        ArgumentNullException.ThrowIfNull(itemIds);
+
+        var length = Math.Min(batchSize, itemIds.Count - startIndex);
+        var chunk = new Guid[length];
+        for (var i = 0; i < length; i++)
+        {
+            chunk[i] = itemIds[startIndex + i];
+        }
+
+        return chunk;
     }
 
     /// <inheritdoc />
@@ -163,22 +170,24 @@ public class ReindexTask : IScheduledTask
             await _client.ResetIndexAsync(cancellationToken).ConfigureAwait(false);
             progress.Report(2);
 
-            // Get an upfront count for monotonic progress. Concurrent edits may shift this slightly
-            // (we cap the reported percentage at 90 anyway), so an approximate total is fine.
-            var totalCount = 0;
+            // Snapshot the id set up front and page over that rather than over StartIndex/Limit.
+            IReadOnlyList<Guid> itemIds;
             try
             {
-                totalCount = _libraryManager.GetCount(new InternalItemsQuery
+                itemIds = _libraryManager.GetItemIds(new InternalItemsQuery
                 {
                     Recursive = true,
                     IncludeItemTypes = IndexableItemTypes,
                 });
-                _logger.LogInformation("Found {TotalCount} items to index", totalCount);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to get item count; progress will be reported as a fraction of work observed so far");
+                _logger.LogError(ex, "Failed to enumerate library items; aborting reindex. The index is now empty - re-run this task");
+                return;
             }
+
+            var totalCount = itemIds.Count;
+            _logger.LogInformation("Found {TotalCount} items to index", totalCount);
 
             var taskUids = new ConcurrentBag<int>();
             using var semaphore = new SemaphoreSlim(parallelism, parallelism);
@@ -191,25 +200,21 @@ public class ReindexTask : IScheduledTask
             var batchNumber = 0;
             var startIndex = 0;
             var consecutiveFetchFailures = 0;
+            var abortedEarly = false;
             const int MaxConsecutiveFetchFailures = 5;
 
-            while (true)
+            while (startIndex < totalCount)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                var idChunk = BuildChunk(itemIds, startIndex, batchSize);
 
                 IReadOnlyList<BaseItem> items;
                 try
                 {
-                    var pageQuery = new InternalItemsQuery
-                    {
-                        Recursive = true,
-                        IncludeItemTypes = IndexableItemTypes,
-                        OrderBy = StableOrder,
-                        StartIndex = startIndex,
-                        Limit = batchSize
-                    };
-
-                    items = _libraryManager.GetItemList(pageQuery);
+                    // Items deleted since the snapshot simply don't come back, which is correct:
+                    // their removal is handled by the real-time sync queue.
+                    items = _libraryManager.GetItemList(new InternalItemsQuery { ItemIds = idChunk });
                 }
                 catch (Exception ex)
                 {
@@ -217,17 +222,16 @@ public class ReindexTask : IScheduledTask
                         ex,
                         "Error fetching items at offset {StartIndex}, skipping batch",
                         startIndex);
-                    errorCount += batchSize;
+                    errorCount += idChunk.Length;
                     startIndex += batchSize;
 
-                    // Guard against an unbounded loop: if fetching keeps throwing we would otherwise
-                    // advance startIndex forever without ever hitting the items.Count == 0 exit.
                     if (++consecutiveFetchFailures >= MaxConsecutiveFetchFailures)
                     {
                         _logger.LogError(
                             "Aborting reindex after {FailureCount} consecutive fetch failures (last at offset {StartIndex})",
                             consecutiveFetchFailures,
                             startIndex);
+                        abortedEarly = true;
                         break;
                     }
 
@@ -235,11 +239,6 @@ public class ReindexTask : IScheduledTask
                 }
 
                 consecutiveFetchFailures = 0;
-
-                if (items.Count == 0)
-                {
-                    break;
-                }
 
                 // Pre-fetch all people for this page in a single DB query (eliminates F2's N+1).
                 var peopleEligibleIds = items
@@ -301,19 +300,12 @@ public class ReindexTask : IScheduledTask
                         cancellationToken));
                 }
 
-                double progressPercent;
-                if (totalCount > 0)
-                {
-                    var fraction = Math.Min(1d, (double)processedCount / totalCount);
-                    progressPercent = 2d + (fraction * 93d);
-                }
-                else
-                {
-                    // No upfront count: report a monotonic asymptote that creeps toward 95.
-                    progressPercent = 95d - (90d / (1d + (processedCount / 10_000d)));
-                }
+                startIndex += batchSize;
 
-                progressPercent = Math.Min(progressPercent, 95d);
+                // Measured against the snapshot position rather than the item count, so items
+                // deleted since the snapshot don't stall progress short of the end.
+                var fraction = Math.Min(1d, (double)Math.Min(startIndex, totalCount) / totalCount);
+                var progressPercent = Math.Min(2d + (fraction * 93d), 95d);
                 progress.Report(progressPercent);
 
                 _logger.LogInformation(
@@ -323,13 +315,6 @@ public class ReindexTask : IScheduledTask
                     skippedCount,
                     errorCount,
                     progressPercent.ToString("F1", CultureInfo.InvariantCulture));
-
-                if (items.Count < batchSize)
-                {
-                    break;
-                }
-
-                startIndex += batchSize;
             }
 
             // Wait for all in-flight indexing requests to be accepted by Meilisearch.
@@ -369,9 +354,15 @@ public class ReindexTask : IScheduledTask
             // back to the 24h heuristic) on its next run. We use the pre-work timestamp so any
             // items modified during the reindex still get picked up.
             var plugin = Plugin.Instance;
-            if (plugin is not null)
+            if (abortedEarly || taskFailures > 0)
+            {
+                _logger.LogError(
+                    "Meilisearch reindex did not complete cleanly, so the index is incomplete - re-run this task. The incremental sync watermark was left unchanged");
+            }
+            else if (plugin is not null)
             {
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
+                plugin.Configuration.IndexSchemaVersion = MeilisearchDocument.SchemaVersion;
                 plugin.SaveConfiguration();
                 _logger.LogInformation("Updated incremental sync watermark to {RunStart:O}", runStart);
             }

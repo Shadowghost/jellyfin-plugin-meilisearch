@@ -10,6 +10,11 @@ namespace Jellyfin.Plugin.Meilisearch;
 public class MeilisearchDocument
 {
     /// <summary>
+    /// The version of the document schema produced by this build of the plugin.
+    /// </summary>
+    public const int SchemaVersion = 2;
+
+    /// <summary>
     /// Gets or sets the item ID (GUID as string).
     /// </summary>
     [JsonPropertyName("id")]
@@ -50,6 +55,12 @@ public class MeilisearchDocument
     /// </summary>
     [JsonPropertyName("itemType")]
     public string ItemType { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the media type ("Video", "Audio", "Photo", "Book"), or null when the item has none.
+    /// </summary>
+    [JsonPropertyName("mediaType")]
+    public string? MediaType { get; set; }
 
     /// <summary>
     /// Gets or sets the type rank for custom ranking.
@@ -207,6 +218,13 @@ public class MeilisearchDocument
     /// </summary>
     [JsonPropertyName("topParentId")]
     public string? TopParentId { get; set; }
+
+    /// <summary>
+    /// Gets or sets every ancestor id of the item, including its direct parent and the collection
+    /// folders it belongs to.
+    /// </summary>
+    [JsonPropertyName("ancestorIds")]
+    public IReadOnlyList<string>? AncestorIds { get; set; }
 
     /// <summary>
     /// Gets or sets the ranking score returned by Meilisearch search.

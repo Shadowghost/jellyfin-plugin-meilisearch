@@ -285,6 +285,10 @@ public class MeilisearchClientWrapper : IDisposable
                 },
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error indexing documents batch");
@@ -327,12 +331,12 @@ public class MeilisearchClientWrapper : IDisposable
     /// </summary>
     /// <param name="documentIds">The document IDs to remove.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task representing the operation.</returns>
-    public async Task RemoveDocumentsAsync(IEnumerable<string> documentIds, CancellationToken cancellationToken)
+    /// <returns>True if the removal was accepted by Meilisearch; false if it failed.</returns>
+    public async Task<bool> RemoveDocumentsAsync(IEnumerable<string> documentIds, CancellationToken cancellationToken)
     {
         if (!IsConfigured)
         {
-            return;
+            return false;
         }
 
         try
@@ -346,10 +350,16 @@ public class MeilisearchClientWrapper : IDisposable
                     _logger.LogDebug("Removed {Count} documents", idList.Count);
                 },
                 cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error removing documents batch");
+            return false;
         }
     }
 
@@ -774,6 +784,8 @@ public class MeilisearchClientWrapper : IDisposable
         await index.UpdateFilterableAttributesAsync(
             [
                 "itemType",
+                "mediaType",
+                "ancestorIds",
                 "productionYear",
                 "genres",
                 "tags",

@@ -28,7 +28,18 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     // will re-cover anything we lose during a runaway scan, so capping memory is preferable.
     private const int ChannelCapacity = 100_000;
 
-    // Cap the number of people names we serialize per document to keep index size bounded.
+    // How often a parked worker re-checks whether sync has been resumed.
+    private const int PausePollMilliseconds = 250;
+
+    // A failed flush is retried, so back off to avoid spinning while Meilisearch is unreachable.
+    private const int FlushRetryBaseDelayMilliseconds = 1_000;
+    private const int FlushRetryMaxDelayMilliseconds = 30_000;
+
+    // Give up on an operation that keeps failing rather than retrying it forever.
+    private const int MaxFlushAttempts = 20;
+
+    // How long shutdown waits for the worker to write out what it has before cancelling it.
+    private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(10);
 
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
@@ -42,18 +53,14 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         SingleWriter = false
     });
 
-    // Signalled when the worker is currently idle (no in-flight batch and queue empty).
-    private readonly ManualResetEventSlim _idleEvent = new(true);
-
-    // Used by FlushAsync to force-flush any pending operations on demand.
-    private readonly SemaphoreSlim _flushSignal = new(0);
-
-    // Stops new writes while paused; coordinates pause/resume.
+    // Guards _pauseCount, and is held by the worker for the duration of a flush.
     private readonly SemaphoreSlim _pauseLock = new(1, 1);
 
     private CancellationTokenSource? _workerCts;
     private Task? _workerTask;
+    private Task? _restoreTask;
     private int _pauseCount;
+    private int _consecutiveFlushFailures;
     private List<PersistedSyncOp>? _leftoverOps;
     private bool _disposed;
 
@@ -100,18 +107,45 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     private static PluginConfiguration Configuration => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
     /// <inheritdoc />
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _libraryManager.ItemAdded += OnItemAdded;
         _libraryManager.ItemUpdated += OnItemUpdated;
         _libraryManager.ItemRemoved += OnItemRemoved;
 
-        _workerCts = new CancellationTokenSource();
-        _workerTask = Task.Run(() => RunWorkerAsync(_workerCts.Token), CancellationToken.None);
+        WarnOnStaleIndexSchema();
 
-        await RestorePersistedOpsAsync(cancellationToken).ConfigureAwait(false);
+        _workerCts = new CancellationTokenSource();
+        var workerToken = _workerCts.Token;
+        _workerTask = Task.Run(() => RunWorkerAsync(workerToken), CancellationToken.None);
+
+        // Deliberately not awaited. Restoring resolves every persisted id through the library, which
+        // is up to ChannelCapacity database round-trips, and hosted services start before Jellyfin
+        // runs its startup tasks - so awaiting here would hold up the whole server and would do the
+        // lookups before the library's static dependencies are even wired up.
+        _restoreTask = Task.Run(() => RestorePersistedOpsAsync(workerToken), CancellationToken.None);
 
         _logger.LogInformation("Meilisearch index service started");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Warns when the index was last built by a plugin version with a different document schema.
+    /// </summary>
+    private void WarnOnStaleIndexSchema()
+    {
+        var indexedVersion = Configuration.IndexSchemaVersion;
+        if (indexedVersion == MeilisearchDocument.SchemaVersion)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "The Meilisearch index was built with document schema v{IndexedVersion} but this plugin writes v{CurrentVersion}. "
+            + "Filters on newly added fields cannot match older documents, so parent-scoped and media-type-scoped searches will "
+            + "under-report until you run the 'Rebuild Meilisearch Index' task",
+            indexedVersion,
+            MeilisearchDocument.SchemaVersion);
     }
 
     /// <inheritdoc />
@@ -121,14 +155,38 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         _libraryManager.ItemUpdated -= OnItemUpdated;
         _libraryManager.ItemRemoved -= OnItemRemoved;
 
+        // Let the restore finish enqueueing before the channel is closed.
+        if (_restoreTask is not null)
+        {
+            try
+            {
+                await _restoreTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutting down faster than the restore can drain; the queue file is left in place.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Meilisearch sync queue restore terminated with an error");
+            }
+
+            _restoreTask = null;
+        }
+
         // Stop accepting new ops and signal the worker to drain.
         _channel.Writer.TryComplete();
 
+        // Give the worker a bounded window to finish writing what it already has, then cancel.
         if (_workerTask is not null)
         {
             try
             {
-                await _workerTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await _workerTask.WaitAsync(ShutdownDrainTimeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogInformation("Meilisearch sync worker did not drain in time; pending operations will be persisted");
             }
             catch (OperationCanceledException)
             {
@@ -143,6 +201,30 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         if (_workerCts is not null)
         {
             await _workerCts.CancelAsync().ConfigureAwait(false);
+        }
+
+        // Await again after cancelling: the worker's finally block is what drains the channel into
+        // _leftoverOps, and persisting before it runs would lose the queue.
+        if (_workerTask is not null)
+        {
+            try
+            {
+                await _workerTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected once cancelled.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Meilisearch sync worker terminated with an error");
+            }
+
+            _workerTask = null;
+        }
+
+        if (_workerCts is not null)
+        {
             _workerCts.Dispose();
             _workerCts = null;
         }
@@ -153,14 +235,14 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Pauses real-time sync. New library change events will be dropped while paused
-    /// (a subsequent reindex is expected to cover the gap). Any in-flight batch is
-    /// flushed and the worker is left idle before this method returns.
+    /// Pauses writes to Meilisearch. Library change events continue to be queued while paused and
+    /// are written once sync resumes; only the flushing stops.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task that completes once the queue is drained and the worker is idle.</returns>
+    /// <returns>A task that completes once any in-flight batch has finished.</returns>
     public async Task PauseAsync(CancellationToken cancellationToken)
     {
+        // The worker holds this lock while flushing, so acquiring it waits out an in-flight batch.
         await _pauseLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -170,8 +252,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         {
             _pauseLock.Release();
         }
-
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -194,49 +274,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         {
             _pauseLock.Release();
         }
-    }
-
-    /// <summary>
-    /// Forces the worker to flush any queued operations now and awaits completion.
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task that completes once the queue is drained.</returns>
-    public async Task FlushAsync(CancellationToken cancellationToken)
-    {
-        // Wake the worker so it stops waiting for the debounce window.
-        try
-        {
-            _flushSignal.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-            // Already pending; that's fine.
-        }
-
-        // Wait until the worker reports idle. Poll on the wait handle with the user's token.
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (_idleEvent.Wait(50, cancellationToken))
-            {
-                // Re-check the channel to make sure no last-millisecond writer slipped a new op in.
-                if (_channel.Reader.Count == 0)
-                {
-                    return;
-                }
-
-                // New ops arrived while we were waking up; loop and let the worker process them.
-                try
-                {
-                    _flushSignal.Release();
-                }
-                catch (SemaphoreFullException)
-                {
-                    // Already pending.
-                }
-            }
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
     }
 
     /// <summary>
@@ -313,6 +350,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             OriginalTitle = item.OriginalTitle,
             SortName = item.SortName,
             ItemType = itemKind.ToString(),
+            MediaType = item.MediaType == MediaType.Unknown ? null : item.MediaType.ToString(),
             TypeRank = typeRank,
 
             // Descriptions.
@@ -347,7 +385,11 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             ProviderIds = item.ProviderIds?.Count > 0 ? item.ProviderIds : null,
             // Top parent (library id) for per-library scoping. GetTopParent can throw if the
             // library context isn't ready, so guard it defensively.
-            TopParentId = TryGetTopParentId(item)
+            TopParentId = TryGetTopParentId(item),
+
+            // Full ancestor chain, so a parent-scoped search can match the whole subtree the way
+            // the built-in SQL provider does rather than only direct children.
+            AncestorIds = TryGetAncestorIds(item)
         };
 
         // Add episode-specific info.
@@ -481,6 +523,29 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         }
     }
 
+    private static IReadOnlyList<string>? TryGetAncestorIds(BaseItem item)
+    {
+        try
+        {
+            var ancestorIds = new List<string>();
+            var seen = new HashSet<Guid>();
+            foreach (var ancestorId in item.GetAncestorIds())
+            {
+                if (ancestorId != Guid.Empty && seen.Add(ancestorId))
+                {
+                    ancestorIds.Add(ancestorId.ToString("N"));
+                }
+            }
+
+            return ancestorIds.Count > 0 ? ancestorIds : null;
+        }
+        catch (Exception)
+        {
+            // Depends on library state being wired up; same defensive treatment as GetTopParent.
+            return null;
+        }
+    }
+
     private static IReadOnlyList<string>? TryGetPeopleNames(ILibraryManager libraryManager, BaseItem item)
     {
         try
@@ -538,25 +603,18 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return;
         }
 
-        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _pauseCount) != 0)
+        if (!Configuration.EnableRealTimeSync)
         {
             return;
         }
 
         if (!ShouldIndexItem(item))
         {
+            EnqueueRemove(item);
             return;
         }
 
-        var op = new SyncOp(item.Id.ToString("N"), SyncOpKind.Upsert, item);
-        if (!_channel.Writer.TryWrite(op))
-        {
-            _logger.LogWarning("Failed to enqueue Meilisearch upsert for item {ItemId}; queue closed", op.Id);
-        }
-        else
-        {
-            _idleEvent.Reset();
-        }
+        Enqueue(new SyncOp(item.Id.ToString("N"), SyncOpKind.Upsert, item, 0));
     }
 
     private void EnqueueRemove(BaseItem? item)
@@ -566,19 +624,26 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return;
         }
 
-        if (!Configuration.EnableRealTimeSync || Volatile.Read(ref _pauseCount) != 0)
+        if (!Configuration.EnableRealTimeSync)
         {
             return;
         }
 
-        var op = new SyncOp(item.Id.ToString("N"), SyncOpKind.Remove, null);
+        Enqueue(new SyncOp(item.Id.ToString("N"), SyncOpKind.Remove, null, 0));
+    }
+
+    /// <summary>
+    /// Queues an operation. Queuing continues while sync is paused - the worker parks instead, and
+    /// the bounded channel provides the backpressure.
+    /// </summary>
+    private void Enqueue(SyncOp op)
+    {
         if (!_channel.Writer.TryWrite(op))
         {
-            _logger.LogWarning("Failed to enqueue Meilisearch remove for item {ItemId}; queue closed", op.Id);
-        }
-        else
-        {
-            _idleEvent.Reset();
+            _logger.LogWarning(
+                "Failed to enqueue Meilisearch {Kind} for item {ItemId}; queue closed",
+                op.Kind,
+                op.Id);
         }
     }
 
@@ -592,7 +657,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 pending.Clear();
-                _idleEvent.Reset();
 
                 // Drain whatever is immediately available.
                 while (reader.TryRead(out var op))
@@ -641,22 +705,45 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                     {
                         Coalesce(pending, op);
                     }
-
-                    // If a forced flush was requested, stop waiting.
-                    if (_flushSignal.Wait(0, CancellationToken.None))
-                    {
-                        break;
-                    }
                 }
 
                 if (pending.Count > 0)
                 {
-                    await FlushBatchAsync(pending, cancellationToken).ConfigureAwait(false);
+                    // Take the pause lock for the whole flush so PauseAsync cannot return while a
+                    // batch is still being written. Released and retaken between attempts so a pause
+                    // requested mid-wait is honoured promptly.
+                    while (true)
+                    {
+                        await _pauseLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        if (_pauseCount == 0)
+                        {
+                            break;
+                        }
+
+                        _pauseLock.Release();
+                        await Task.Delay(PausePollMilliseconds, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    bool flushed;
+                    try
+                    {
+                        flushed = await FlushBatchAsync(pending, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _pauseLock.Release();
+                    }
+
+                    if (!flushed)
+                    {
+                        // Back off outside the pause lock so a pause requested meanwhile isn't
+                        // stuck waiting out the retry delay.
+                        await Task.Delay(GetFlushRetryDelay(), cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 if (reader.Count == 0)
                 {
-                    _idleEvent.Set();
                 }
             }
         }
@@ -679,8 +766,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             _leftoverOps = pending.Count > 0
                 ? pending.Values.Select(static o => new PersistedSyncOp(o.Id, o.Kind.ToString())).ToList()
                 : null;
-
-            _idleEvent.Set();
         }
     }
 
@@ -699,7 +784,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         pending[op.Id] = op;
     }
 
-    private async Task FlushBatchAsync(Dictionary<string, SyncOp> pending, CancellationToken cancellationToken)
+    private async Task<bool> FlushBatchAsync(Dictionary<string, SyncOp> pending, CancellationToken cancellationToken)
     {
         var docsToIndex = new List<MeilisearchDocument>(pending.Count);
         var idsToRemove = new List<string>();
@@ -742,24 +827,17 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             }
         }
 
+        var failed = false;
         try
         {
             if (docsToIndex.Count > 0)
             {
-                await _client.IndexDocumentsAsync(docsToIndex, cancellationToken).ConfigureAwait(false);
+                failed |= await _client.IndexDocumentsAsync(docsToIndex, cancellationToken).ConfigureAwait(false) is null;
             }
 
             if (idsToRemove.Count > 0)
             {
-                await _client.RemoveDocumentsAsync(idsToRemove, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (docsToIndex.Count > 0 || idsToRemove.Count > 0)
-            {
-                _logger.LogDebug(
-                    "Flushed Meilisearch sync batch: {UpsertCount} upserts, {RemoveCount} removes",
-                    docsToIndex.Count,
-                    idsToRemove.Count);
+                failed |= !await _client.RemoveDocumentsAsync(idsToRemove, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -773,9 +851,70 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                 "Error flushing Meilisearch sync batch ({UpsertCount} upserts, {RemoveCount} removes)",
                 docsToIndex.Count,
                 idsToRemove.Count);
+            failed = true;
         }
 
+        if (failed)
+        {
+            _logger.LogWarning(
+                "Meilisearch sync batch failed ({UpsertCount} upserts, {RemoveCount} removes); requeueing for retry",
+                docsToIndex.Count,
+                idsToRemove.Count);
+
+            RequeueFailedBatch(pending);
+            pending.Clear();
+            _consecutiveFlushFailures++;
+            return false;
+        }
+
+        if (docsToIndex.Count > 0 || idsToRemove.Count > 0)
+        {
+            _logger.LogDebug(
+                "Flushed Meilisearch sync batch: {UpsertCount} upserts, {RemoveCount} removes",
+                docsToIndex.Count,
+                idsToRemove.Count);
+        }
+
+        _consecutiveFlushFailures = 0;
         pending.Clear();
+        return true;
+    }
+
+    private int GetFlushRetryDelay()
+    {
+        var exponent = Math.Min(Math.Max(_consecutiveFlushFailures - 1, 0), 10);
+        return Math.Min(FlushRetryMaxDelayMilliseconds, FlushRetryBaseDelayMilliseconds * (1 << exponent));
+    }
+
+    /// <summary>
+    /// Returns the operations from a failed batch to the queue so they are retried.
+    /// </summary>
+    private void RequeueFailedBatch(Dictionary<string, SyncOp> pending)
+    {
+        var exhausted = 0;
+
+        foreach (var op in pending.Values)
+        {
+            var attempt = op.Attempt + 1;
+            if (attempt >= MaxFlushAttempts)
+            {
+                exhausted++;
+                continue;
+            }
+
+            if (!_channel.Writer.TryWrite(op with { Attempt = attempt }))
+            {
+                exhausted++;
+            }
+        }
+
+        if (exhausted > 0)
+        {
+            _logger.LogWarning(
+                "Dropped {Count} Meilisearch sync operations after {MaxAttempts} failed attempts; a full reindex is needed to reconcile them",
+                exhausted,
+                MaxFlushAttempts);
+        }
     }
 
     private async Task RestorePersistedOpsAsync(CancellationToken cancellationToken)
@@ -810,10 +949,9 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
             if (string.Equals(entry.Kind, nameof(SyncOpKind.Remove), StringComparison.Ordinal))
             {
-                if (_channel.Writer.TryWrite(new SyncOp(entry.Id, SyncOpKind.Remove, null)))
+                if (_channel.Writer.TryWrite(new SyncOp(entry.Id, SyncOpKind.Remove, null, 0)))
                 {
                     restoredRemoves++;
-                    _idleEvent.Reset();
                 }
                 else
                 {
@@ -851,10 +989,9 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                 continue;
             }
 
-            if (_channel.Writer.TryWrite(new SyncOp(entry.Id, SyncOpKind.Upsert, item)))
+            if (_channel.Writer.TryWrite(new SyncOp(entry.Id, SyncOpKind.Upsert, item, 0)))
             {
                 restoredUpserts++;
-                _idleEvent.Reset();
             }
             else
             {
@@ -949,8 +1086,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         if (disposing)
         {
             _workerCts?.Dispose();
-            _idleEvent.Dispose();
-            _flushSignal.Dispose();
             _pauseLock.Dispose();
             _persistence.Dispose();
         }
@@ -964,5 +1099,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     /// <param name="Id">The document id (GUID, "N" format).</param>
     /// <param name="Kind">Whether to upsert or remove.</param>
     /// <param name="Item">The library item to upsert; null for remove operations.</param>
-    private readonly record struct SyncOp(string Id, SyncOpKind Kind, BaseItem? Item);
+    /// <param name="Attempt">How many times writing this operation has already failed.</param>
+    private readonly record struct SyncOp(string Id, SyncOpKind Kind, BaseItem? Item, int Attempt);
 }

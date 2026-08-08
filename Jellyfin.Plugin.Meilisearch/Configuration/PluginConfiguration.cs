@@ -26,6 +26,7 @@ public class PluginConfiguration : BasePluginConfiguration
         HealthCheckIntervalSeconds = 60;
         Synonyms = string.Empty;
         LastIncrementalReindexUtc = null;
+        IndexSchemaVersion = 0;
     }
 
     /// <summary>
@@ -94,4 +95,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the timestamp of the last incremental reindex run.
     /// </summary>
     public DateTime? LastIncrementalReindexUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets the <see cref="MeilisearchDocument.SchemaVersion"/> that was current at the last
+    /// successful full reindex. Zero means the index predates schema tracking.
+    /// </summary>
+    public int IndexSchemaVersion { get; set; }
 }
