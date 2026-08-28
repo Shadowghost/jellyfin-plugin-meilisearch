@@ -1,3 +1,4 @@
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using Jellyfin.Plugin.Meilisearch.Tasks;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
@@ -17,12 +18,18 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<MeilisearchClientWrapper>();
 
+        // Registered before the index service, which depends on it. The hosted-service registration
+        // resolves the same singleton so the model is loaded once, not once per consumer.
+        serviceCollection.AddSingleton<EmbeddingService>();
+        serviceCollection.AddHostedService(sp => sp.GetRequiredService<EmbeddingService>());
+
         serviceCollection.AddSingleton<MeilisearchIndexService>();
         serviceCollection.AddHostedService(sp => sp.GetRequiredService<MeilisearchIndexService>());
 
         serviceCollection.AddHostedService<MeilisearchHealthMonitor>();
 
         serviceCollection.AddSingleton<IScheduledTask, ReindexTask>();
+        serviceCollection.AddSingleton<IScheduledTask, DownloadEmbeddingModelTask>();
 
         serviceCollection.AddSingleton<IScheduledTask, IncrementalReindexTask>();
 

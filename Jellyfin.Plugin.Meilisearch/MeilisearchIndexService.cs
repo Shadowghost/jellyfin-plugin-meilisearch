@@ -7,6 +7,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.Meilisearch.Configuration;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
@@ -47,6 +48,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
+    private readonly EmbeddingService _embeddings;
     private readonly ILogger<MeilisearchIndexService> _logger;
     private readonly SyncQueuePersistence _persistence;
 
@@ -73,11 +75,13 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     /// </summary>
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="client">The Meilisearch client wrapper.</param>
+    /// <param name="embeddings">The embedding service used to attach vectors to synced documents.</param>
     /// <param name="logger">The logger.</param>
     /// <param name="applicationPaths">The application paths used to locate the sync queue persistence file.</param>
     public MeilisearchIndexService(
         ILibraryManager libraryManager,
         MeilisearchClientWrapper client,
+        EmbeddingService embeddings,
         ILogger<MeilisearchIndexService> logger,
         IApplicationPaths applicationPaths)
     {
@@ -85,6 +89,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
         _libraryManager = libraryManager;
         _client = client;
+        _embeddings = embeddings;
         _logger = logger;
         _persistence = new SyncQueuePersistence(applicationPaths, logger);
     }
@@ -902,6 +907,9 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                 _logger.LogDebug(ex, "Failed to build Meilisearch document for item {ItemId}; skipping", op.Id);
             }
         }
+
+        // Embed before pushing so a document and its vector land in the same Meilisearch task.
+        _embeddings.AttachVectors(docsToIndex, cancellationToken);
 
         var failed = false;
         try

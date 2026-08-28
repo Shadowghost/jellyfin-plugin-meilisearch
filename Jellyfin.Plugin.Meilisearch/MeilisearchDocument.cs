@@ -243,4 +243,12 @@ public class MeilisearchDocument
     [JsonPropertyName("_rankingScore")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? RankingScore { get; set; }
+
+    /// <summary>
+    /// Gets or sets the user-provided embeddings, keyed by embedder name.
+    /// Null - and therefore omitted from the payload entirely - unless semantic search is enabled.
+    /// </summary>
+    [JsonPropertyName("_vectors")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, MeilisearchVector>? Vectors { get; set; }
 }

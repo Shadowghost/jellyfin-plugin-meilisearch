@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using Jellyfin.Plugin.Meilisearch.Tasks;
 using MediaBrowser.Common.Api;
 using MediaBrowser.Model.Tasks;
@@ -21,18 +22,22 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 public class MeilisearchController : ControllerBase
 {
     private readonly MeilisearchClientWrapper _client;
+    private readonly EmbeddingService _embeddings;
     private readonly ITaskManager _taskManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MeilisearchController"/> class.
     /// </summary>
     /// <param name="client">The Meilisearch client wrapper.</param>
+    /// <param name="embeddings">The embedding service.</param>
     /// <param name="taskManager">The scheduled task manager, used to start a reindex on request.</param>
     public MeilisearchController(
         MeilisearchClientWrapper client,
+        EmbeddingService embeddings,
         ITaskManager taskManager)
     {
         _client = client;
+        _embeddings = embeddings;
         _taskManager = taskManager;
     }
 
@@ -73,6 +78,12 @@ public class MeilisearchController : ControllerBase
             IsAuthenticated: health.IsAuthenticated,
             LastIncrementalReindexUtc: Plugin.Instance?.Configuration.LastIncrementalReindexUtc,
             Error: health.Error,
+            SemanticSearchEnabled: _embeddings.IsEnabled,
+            EmbeddingState: _embeddings.State.ToString(),
+            EmbeddingModelDirectory: _embeddings.IsEnabled ? _embeddings.GetModelDirectory() : null,
+            EmbeddingError: _embeddings.Error,
+            EmbeddingCacheCount: _embeddings.CachedVectorCount,
+            EmbeddingCacheHitRate: _embeddings.CacheHitRate,
             MatchingStrategy: _client.EffectiveMatchingStrategy,
             AverageSearchTimeMilliseconds: _client.AverageSearchTimeMilliseconds,
             SearchCount: _client.SearchCount);

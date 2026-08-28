@@ -6,6 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Nullable>enable</Nullable>
     <AnalysisMode>AllEnabledByDefault</AnalysisMode>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +20,16 @@
     <PackageReference Include="Meilisearch" Version="0.18.0" />
   </ItemGroup>
 
+  <!--
+    Local embedding model for semantic search. ONNX Runtime brings a native library per platform;
+    CopyLocalLockFileAssemblies lays the runtimes/ tree out next to the plugin assembly so the
+    P/Invoke resolves inside Jellyfin's plugin load context.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="SerilogAnalyzer" Version="0.15.0" PrivateAssets="All" />
     <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="All" />
@@ -29,4 +40,44 @@
     <None Remove="Configuration\configPage.html" />
     <EmbeddedResource Include="Configuration/configPage.html" />
   </ItemGroup>
+
+  <!--
+    Restage ONNX Runtime's native libraries out of runtimes/ and into native/.
+
+    Jellyfin's plugin loader discovers assemblies with
+    Directory.GetFiles(pluginDir, "*.dll", SearchOption.AllDirectories) and calls
+    LoadFromAssemblyPath on every hit. A native Windows onnxruntime.dll under runtimes/ is not a
+    managed assembly, so that call throws and the catch-all marks the entire plugin Malfunctioned -
+    on every platform, not just Windows. Giving the Windows natives a non-.dll extension keeps them
+    out of that scan; OnnxRuntimeNativeLoader loads them by full path, which does not care about the
+    extension. The .so and .dylib natives are never scanned, so they keep their real names.
+
+    This also drops the mobile natives and Windows link libraries, which a server cannot use and
+    which account for over 100 MB.
+  -->
+  <Target Name="StageOnnxRuntimeNatives" AfterTargets="Build">
+    <ItemGroup>
+      <OnnxNative Include="$(OutDir)runtimes/linux-x64/native/libonnxruntime.so" Condition="Exists('$(OutDir)runtimes/linux-x64/native/libonnxruntime.so')">
+        <StagedPath>native/linux-x64/libonnxruntime.so</StagedPath>
+      </OnnxNative>
+      <OnnxNative Include="$(OutDir)runtimes/linux-arm64/native/libonnxruntime.so" Condition="Exists('$(OutDir)runtimes/linux-arm64/native/libonnxruntime.so')">
+        <StagedPath>native/linux-arm64/libonnxruntime.so</StagedPath>
+      </OnnxNative>
+      <OnnxNative Include="$(OutDir)runtimes/osx-arm64/native/libonnxruntime.dylib" Condition="Exists('$(OutDir)runtimes/osx-arm64/native/libonnxruntime.dylib')">
+        <StagedPath>native/osx-arm64/libonnxruntime.dylib</StagedPath>
+      </OnnxNative>
+      <OnnxNative Include="$(OutDir)runtimes/osx-x64/native/libonnxruntime.dylib" Condition="Exists('$(OutDir)runtimes/osx-x64/native/libonnxruntime.dylib')">
+        <StagedPath>native/osx-x64/libonnxruntime.dylib</StagedPath>
+      </OnnxNative>
+      <OnnxNative Include="$(OutDir)runtimes/win-x64/native/onnxruntime.dll" Condition="Exists('$(OutDir)runtimes/win-x64/native/onnxruntime.dll')">
+        <StagedPath>native/win-x64/onnxruntime.nativelib</StagedPath>
+      </OnnxNative>
+      <OnnxNative Include="$(OutDir)runtimes/win-arm64/native/onnxruntime.dll" Condition="Exists('$(OutDir)runtimes/win-arm64/native/onnxruntime.dll')">
+        <StagedPath>native/win-arm64/onnxruntime.nativelib</StagedPath>
+      </OnnxNative>
+    </ItemGroup>
+
+    <Copy SourceFiles="@(OnnxNative)" DestinationFiles="@(OnnxNative->'$(OutDir)%(StagedPath)')" SkipUnchangedFiles="true" />
+    <RemoveDir Directories="$(OutDir)runtimes" ContinueOnError="true" />
+  </Target>
 </Project>

@@ -13,5 +13,20 @@ imageUrl: "https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilise
 artifacts:
   - "Jellyfin.Plugin.Meilisearch.dll"
   - "Meilisearch.dll"
+  # Semantic search: local ONNX inference. The managed assemblies plus one native ONNX Runtime
+  # library per server platform, kept in the runtimes/ layout the native resolver probes for.
+  - "Microsoft.ML.OnnxRuntime.dll"
+  - "Microsoft.ML.Tokenizers.dll"
+  - "System.Numerics.Tensors.dll"
+  - "Google.Protobuf.dll"
+  # Staged under native/ with a non-.dll extension on Windows: Jellyfin globs *.dll through every
+  # plugin subdirectory and loads each hit as a managed assembly, and a native DLL there disables the
+  # whole plugin. See StageOnnxRuntimeNatives in the csproj.
+  - "native/linux-x64/libonnxruntime.so"
+  - "native/linux-arm64/libonnxruntime.so"
+  - "native/osx-arm64/libonnxruntime.dylib"
+  - "native/win-x64/onnxruntime.nativelib"
+  - "native/win-arm64/onnxruntime.nativelib"
 changelog: >
   Initial release with search provider, real-time sync, and reindex task.
+  Optional semantic search using a locally run Qwen3-Embedding-0.6B model, disabled by default.
