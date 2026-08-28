@@ -17,6 +17,9 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 - Live status panel (document count, index size, last sync) in the config page
 - Custom synonyms (e.g. `mcu=marvel`, `lotr=lord of the rings`)
 - Configurable minimum match score threshold
+- Per-type result quotas, so songs matching an artist name can't crowd out the movies and episodes
+- Automatic reconnect when the Meilisearch container is restarted or gets a new address
+- REST endpoints for status and connection testing
 - Supports movies, TV shows, episodes, music, audiobooks, and more
 
 ## Requirements
@@ -126,6 +129,50 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 
 Use the **Test Connection** button to verify connectivity and that your API key is valid. The **Status** panel shows the live document count, index size, last incremental sync time, and field distribution.
 
+## How Search Works
+
+### The plugin never fully replaces Jellyfin's own search
+
+Jellyfin's `SearchManager` runs *external* providers (this plugin) and *internal* providers
+(the built-in SQL provider) **in parallel** on every query. External results win whenever
+they are non-empty; the SQL results are used only as a fallback. Two consequences worth
+knowing:
+
+- If the Meilisearch index is empty, stale, or the server is down, search silently degrades
+  to the built-in SQL search rather than returning nothing. Check the **Status** panel and
+  the server log if results look like they're coming from the wrong engine.
+- Jellyfin core applies user, library-visibility and parental-rating filtering *after* the
+  provider returns. The plugin deliberately does not index permissions, so a document in the
+  index is never by itself a leak — but it does mean the number of hits a user sees can be
+  lower than the number the plugin returned.
+
+### Query handling
+
+- **Single item type (or none)** - one Meilisearch query, with the item type and any parent,
+  media-type or exclusion constraints applied as a filter.
+- **Multiple item types** - one query per type inside a single HTTP multi-search request,
+  each with its own share of the result budget. Without this, a strongly-matching type (all
+  the songs by an artist) would consume the whole result set and hide weaker but relevant
+  matches in other types (the artist, their albums, a documentary about them).
+- **Parent scoping** - `parentId` matches against the item's full indexed ancestor chain, not
+  just its direct parent, so scoping to a TV library still matches episodes nested under
+  seasons under series.
+
+### Index configuration
+
+The plugin owns the index settings and re-applies them whenever the configuration changes.
+They are idempotent, so editing them by hand in Meilisearch will be overwritten.
+
+| Setting | Value |
+|---------|-------|
+| Searchable attributes (in priority order) | `name`, `originalTitle`, `sortName`, `seriesName`, `seasonName`, `albumName`, `artists`, `albumArtists`, `people`, `genres`, `tags`, `studios`, `providerIds.*`, `productionLocations`, `tagline`, `overview` |
+| Typo tolerance | Enabled; 1 typo from 4 characters, 2 typos from 8 |
+| Displayed attributes | `id` only — the provider consumes nothing else, which keeps search responses small |
+| Synonyms | Taken from the **Synonyms** setting |
+
+Because `name` outranks `overview`, a title match always beats a plot-summary match. Adding
+synonyms is the supported way to tune recall; the attribute order itself is not configurable.
+
 ## Indexing Your Library
 
 ### Initial Index
@@ -163,7 +210,7 @@ unreachable, the queue is paused until the server recovers.
 
 ## Indexed Content Types
 
-The plugin indexes the following item types:
+The plugin indexes the item types the built-in SQL search would return:
 
 - Movies
 - TV Series
@@ -177,6 +224,48 @@ The plugin indexes the following item types:
 - Genres & Studios
 - Trailers
 - Live TV Channels & Programs
+- Video extras (behind the scenes, deleted scenes, interviews, featurettes, shorts)
+
+Deliberately **not** indexed:
+
+- **Seasons** - users search for the series, not for "Season 3".
+- **Virtual / missing items** - episodes and movies that have metadata but no media file.
+- **Folders, collection folders, playlist folders and years** - Jellyfin's own search excludes
+  these too.
+
+## Upgrading
+
+The plugin stamps a document schema version into its configuration after each successful full
+reindex. When a new plugin version writes a newer schema than the one your index was built
+with, it logs a warning at startup:
+
+> The Meilisearch index was built with document schema v1 but this plugin writes v2 …
+
+Filters can only match fields that exist on a document, so until you act on that warning,
+searches that rely on newly added fields (parent scoping and media-type scoping, for
+instance) will under-report. **Run the "Rebuild Meilisearch Index" task after any upgrade
+that logs this warning.** Everything else keeps working in the meantime.
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---------|----------------------|
+| No results, or results identical to stock Jellyfin | The index is empty and search fell back to the SQL provider. Run **Rebuild Meilisearch Index** and check the document count in the **Status** panel. |
+| Parent-scoped or media-type-scoped searches miss items | Stale document schema — see [Upgrading](#upgrading). |
+| Results stop updating after adding media | Real-time sync is disabled, or the health monitor paused it because Meilisearch is unreachable. The log records both. Sync resumes automatically once the server returns. |
+| Test Connection reports reachable but not authenticated | The **API Key** is wrong or lacks permission. A master key or a key with search + documents + settings + tasks access is required. |
+| Meilisearch was restarted / its container was recreated | Handled automatically: on a communication failure the plugin rebuilds its HTTP client (clearing the pooled connection and cached DNS entry) and retries once. No Jellyfin restart needed. |
+| Fewer results than expected for a fuzzy query | Lower **Minimum Match Score**. It maps to Meilisearch's `rankingScoreThreshold`, so raising it buys precision at the cost of recall. |
+| Pending sync operations after an unclean shutdown | They are persisted to a JSON file in the plugin's configuration directory and replayed on the next start. |
+
+## REST API
+
+Both endpoints require an authenticated administrator and back the config page's status panel.
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/Plugins/Meilisearch/Stats` | Document count, index size, indexing state, field distribution, health, authentication state, last incremental sync timestamp |
+| `POST` | `/Plugins/Meilisearch/TestConnection` | Reachability and API-key validation |
 
 ## Architecture
 
