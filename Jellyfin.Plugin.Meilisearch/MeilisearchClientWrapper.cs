@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
@@ -21,16 +22,33 @@ public class MeilisearchClientWrapper : IDisposable
     private const double TaskWaitTimeoutMs = 3 * 60 * 1000;
     private const int TaskWaitIntervalMs = 250;
 
+    // Weight given to the newest sample in the rolling search-latency average. Low enough that one
+    // slow query does not dominate the figure shown on the config page.
+    private const double SearchTimeSmoothingFactor = 0.25;
+
+    private static readonly string[] SupportedMatchingStrategies = ["frequency", "last", "all"];
+
     private readonly ILogger<MeilisearchClientWrapper> _logger;
     private readonly SemaphoreSlim _clientLock = new(1, 1);
     private readonly SemaphoreSlim _settingsLock = new(1, 1);
+    private readonly object _metricsLock = new();
     private MeilisearchClient? _client;
     private string? _currentUrl;
     private string? _currentApiKey;
+    private double _averageSearchMilliseconds;
+    private long _searchCount;
 
     private volatile global::Meilisearch.Index? _cachedIndex;
     private volatile string? _cachedIndexKey;
     private volatile string? _settingsAppliedKey;
+
+    // Set once the server rejects the configured matching strategy, so the fallback is used for the
+    // rest of this connection instead of retrying a query that is known to fail.
+    private volatile bool _matchingStrategyRejected;
+
+    // The last unrecognized matching strategy warned about, so a mistyped configuration value is
+    // logged once instead of once per query.
+    private volatile string? _warnedMatchingStrategy;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MeilisearchClientWrapper"/> class.
@@ -50,6 +68,57 @@ public class MeilisearchClientWrapper : IDisposable
     /// Gets a value indicating whether the client is configured.
     /// </summary>
     public bool IsConfigured => !string.IsNullOrWhiteSpace(Configuration.MeilisearchUrl);
+
+    /// <summary>
+    /// Gets the rolling average round-trip time of the Meilisearch search requests issued since
+    /// startup, in milliseconds, or null when no search has run yet.
+    /// </summary>
+    /// <remarks>
+    /// An exponential moving average weighted by <see cref="SearchTimeSmoothingFactor"/>, not a mean
+    /// over all searches: it tracks current behaviour rather than accumulating history. It measures
+    /// only the HTTP call to Meilisearch, so it excludes the time Jellyfin spends loading the matched
+    /// items and filtering them by user access.
+    /// </remarks>
+    public double? AverageSearchTimeMilliseconds
+    {
+        get
+        {
+            lock (_metricsLock)
+            {
+                return _searchCount == 0 ? null : _averageSearchMilliseconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of Meilisearch search requests issued since startup.
+    /// </summary>
+    public long SearchCount
+    {
+        get
+        {
+            lock (_metricsLock)
+            {
+                return _searchCount;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the matching strategy in effect, which is the configured one unless the server has
+    /// rejected it and the fallback took over.
+    /// </summary>
+    public string EffectiveMatchingStrategy => ResolveMatchingStrategy();
+
+    /// <summary>
+    /// Discards the cached client, index handle and applied-settings marker so that the next request
+    /// reconnects from scratch. Exposed for the config page's reconnect action; recovery from a
+    /// transient failure happens automatically and does not need this.
+    /// </summary>
+    public void Reconnect()
+    {
+        ResetClient();
+    }
 
     /// <summary>
     /// Searches for documents matching the query.
@@ -72,15 +141,15 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            return await ExecuteWithReconnectRetryAsync<IReadOnlyList<(string Id, double Score)>>(
-                async ct =>
+            return await ExecuteSearchAsync<IReadOnlyList<(string Id, double Score)>>(
+                async (matchingStrategy, ct) =>
                 {
                     var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
                     var searchParams = new SearchQuery
                     {
                         Limit = limit,
                         ShowRankingScore = true,
-                        MatchingStrategy = "last",
+                        MatchingStrategy = matchingStrategy,
                         Filter = filter
                     };
 
@@ -90,7 +159,9 @@ public class MeilisearchClientWrapper : IDisposable
                         searchParams.RankingScoreThreshold = minScore / 100m;
                     }
 
+                    var stopwatch = Stopwatch.StartNew();
                     var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
+                    RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
                     return results.Hits
                         .Select(hit => (hit.Id, hit.RankingScore ?? 0.0))
@@ -130,8 +201,8 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            return await ExecuteWithReconnectRetryAsync<IReadOnlyList<(string Id, double Score)>>(
-                async ct =>
+            return await ExecuteSearchAsync<IReadOnlyList<(string Id, double Score)>>(
+                async (matchingStrategy, ct) =>
                 {
                     // Ensure the index exists and settings are applied before issuing the multi-search.
                     await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
@@ -160,7 +231,7 @@ public class MeilisearchClientWrapper : IDisposable
                             Limit = perTypeLimit,
                             Filter = combinedFilter,
                             ShowRankingScore = true,
-                            MatchingStrategy = "last"
+                            MatchingStrategy = matchingStrategy
                         };
 
                         if (threshold.HasValue)
@@ -172,7 +243,9 @@ public class MeilisearchClientWrapper : IDisposable
                     }
 
                     var multiQuery = new MultiSearchQuery { Queries = queries };
+                    var stopwatch = Stopwatch.StartNew();
                     var result = await client.MultiSearchAsync(multiQuery, ct).ConfigureAwait(false);
+                    RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
                     var merged = new List<(string Id, double Score)>(types.Count * perTypeLimit);
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -542,10 +615,12 @@ public class MeilisearchClientWrapper : IDisposable
                     ? new MeilisearchClient(config.MeilisearchUrl)
                     : new MeilisearchClient(config.MeilisearchUrl, config.ApiKey);
 
-                // Configuration changed; invalidate cached index/settings.
+                // Configuration changed; invalidate cached index/settings. The matching-strategy
+                // probe is per-server, so a new URL means asking again.
                 _cachedIndex = null;
                 _cachedIndexKey = null;
                 _settingsAppliedKey = null;
+                _matchingStrategyRejected = false;
 
                 _logger.LogInformation("Created Meilisearch client for {Url}", config.MeilisearchUrl);
             }
@@ -575,6 +650,7 @@ public class MeilisearchClientWrapper : IDisposable
             _cachedIndex = null;
             _cachedIndexKey = null;
             _settingsAppliedKey = null;
+            _matchingStrategyRejected = false;
             _logger.LogInformation("Reset Meilisearch client; it will be recreated on next use");
         }
         finally
@@ -642,10 +718,128 @@ public class MeilisearchClientWrapper : IDisposable
         };
 
     /// <summary>
+    /// Runs a search operation with the configured matching strategy, applying the same
+    /// reconnect-and-retry behaviour as <see cref="ExecuteWithReconnectRetryAsync{T}"/> and, on top of
+    /// it, falling back to <see cref="PluginConfiguration.FallbackMatchingStrategy"/> if the server
+    /// rejects the strategy it was given.
+    /// </summary>
+    /// <typeparam name="T">The operation result type.</typeparam>
+    /// <param name="operation">The operation to execute; receives the matching strategy to use.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The operation result.</returns>
+    /// <remarks>
+    /// Probing the server version up front would need the <c>version</c> action, which a restricted
+    /// API key does not have, so support is inferred from the first rejection instead. The fallback
+    /// is then remembered for the rest of the connection: exactly one query pays for it.
+    /// </remarks>
+    private async Task<T> ExecuteSearchAsync<T>(Func<string, CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
+    {
+        var strategy = ResolveMatchingStrategy();
+
+        try
+        {
+            return await ExecuteWithReconnectRetryAsync(ct => operation(strategy, ct), cancellationToken).ConfigureAwait(false);
+        }
+        catch (MeilisearchApiError ex) when (IsUnsupportedMatchingStrategy(ex, strategy))
+        {
+            _matchingStrategyRejected = true;
+            _logger.LogWarning(
+                "Meilisearch rejected the '{Strategy}' matching strategy; using '{Fallback}' instead for this connection. The 'frequency' strategy needs Meilisearch 1.11 or newer",
+                strategy,
+                PluginConfiguration.FallbackMatchingStrategy);
+
+            return await ExecuteWithReconnectRetryAsync(
+                ct => operation(PluginConfiguration.FallbackMatchingStrategy, ct),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Resolves the matching strategy to send with a query: the configured one, corrected to
+    /// <see cref="PluginConfiguration.FallbackMatchingStrategy"/> when it is unrecognized or when the
+    /// server has already rejected it.
+    /// </summary>
+    /// <returns>A matching strategy Meilisearch accepts.</returns>
+    private string ResolveMatchingStrategy()
+    {
+        var configured = Configuration.MatchingStrategy;
+        var requested = string.IsNullOrWhiteSpace(configured)
+            ? PluginConfiguration.DefaultMatchingStrategy
+            : configured.Trim();
+
+        string? canonical = null;
+        foreach (var supported in SupportedMatchingStrategies)
+        {
+            if (string.Equals(supported, requested, StringComparison.OrdinalIgnoreCase))
+            {
+                canonical = supported;
+                break;
+            }
+        }
+
+        if (canonical is null)
+        {
+            // Only reachable by hand-editing the configuration file. Warn once per distinct value
+            // rather than on every query.
+            if (!string.Equals(_warnedMatchingStrategy, requested, StringComparison.Ordinal))
+            {
+                _warnedMatchingStrategy = requested;
+                _logger.LogWarning(
+                    "Unknown Meilisearch matching strategy '{Strategy}' configured; using '{Fallback}'",
+                    requested,
+                    PluginConfiguration.FallbackMatchingStrategy);
+            }
+
+            return PluginConfiguration.FallbackMatchingStrategy;
+        }
+
+        return _matchingStrategyRejected ? PluginConfiguration.FallbackMatchingStrategy : canonical;
+    }
+
+    /// <summary>
+    /// Determines whether an API error is Meilisearch refusing the matching strategy that was sent,
+    /// rather than a problem with the query itself.
+    /// </summary>
+    /// <param name="error">The error returned by Meilisearch.</param>
+    /// <param name="strategy">The strategy that was sent.</param>
+    /// <returns><c>true</c> if the query is worth retrying with the fallback strategy.</returns>
+    private static bool IsUnsupportedMatchingStrategy(MeilisearchApiError error, string strategy)
+    {
+        if (string.Equals(strategy, PluginConfiguration.FallbackMatchingStrategy, StringComparison.Ordinal))
+        {
+            // The fallback is universally supported; a rejection means something else is wrong.
+            return false;
+        }
+
+        return error.Code?.Contains("matching_strategy", StringComparison.OrdinalIgnoreCase) == true
+            || error.Message?.Contains("matchingStrategy", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    /// <summary>
+    /// Folds a search round-trip into the rolling average reported by the status endpoint.
+    /// </summary>
+    /// <param name="elapsedMilliseconds">The round-trip time of the search request.</param>
+    private void RecordSearchDuration(double elapsedMilliseconds)
+    {
+        lock (_metricsLock)
+        {
+            _averageSearchMilliseconds = _searchCount == 0
+                ? elapsedMilliseconds
+                : (SearchTimeSmoothingFactor * elapsedMilliseconds) + ((1 - SearchTimeSmoothingFactor) * _averageSearchMilliseconds);
+            _searchCount++;
+        }
+    }
+
+    /// <summary>
     /// Builds a cache key composed of the URL, API key and index name.
     /// </summary>
     private static string BuildCacheKey(PluginConfiguration config)
-        => string.Concat(config.MeilisearchUrl ?? string.Empty, "|", config.ApiKey ?? string.Empty, "|", config.IndexName ?? string.Empty);
+        => string.Concat(
+            config.MeilisearchUrl ?? string.Empty,
+            "|",
+            config.ApiKey ?? string.Empty,
+            "|",
+            config.IndexName ?? string.Empty);
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -776,7 +970,11 @@ public class MeilisearchClientWrapper : IDisposable
                 "providerIds.Tvdb",
                 "productionLocations",
                 "tagline",
-                "overview"
+                "overview",
+
+                // Lowest priority on purpose: a file-name match should never outrank a title or a
+                // plot match, it only has to make the item findable by its release name.
+                "path"
             ],
             cancellationToken).ConfigureAwait(false);
 
@@ -834,6 +1032,11 @@ public class MeilisearchClientWrapper : IDisposable
                 "typeRank:desc",
                 "sort",
                 "productionYear:desc",
+
+                // Final tie-breakers for equally relevant items of the same type and year: prefer
+                // the better-rated one, and treat a missing rating as neutral rather than worst.
+                "communityRating:desc",
+                "criticRating:desc",
             ],
             cancellationToken).ConfigureAwait(false);
 

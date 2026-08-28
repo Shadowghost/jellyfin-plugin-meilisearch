@@ -14,6 +14,9 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="IsAuthenticated">Whether the configured API key is accepted by Meilisearch.</param>
 /// <param name="LastIncrementalReindexUtc">Timestamp of the last incremental reindex run, if any.</param>
 /// <param name="Error">Optional error message when the connection or auth check failed.</param>
+/// <param name="MatchingStrategy">The Meilisearch matching strategy queries are currently sent with.</param>
+/// <param name="AverageSearchTimeMilliseconds">Rolling average round-trip time of search requests, or null before the first search.</param>
+/// <param name="SearchCount">Number of search requests issued since startup.</param>
 public sealed record MeilisearchStatsResponse(
     long? DocumentCount,
     bool? IsIndexing,
@@ -22,4 +25,7 @@ public sealed record MeilisearchStatsResponse(
     bool IsHealthy,
     bool IsAuthenticated,
     DateTime? LastIncrementalReindexUtc,
-    string? Error);
+    string? Error,
+    string MatchingStrategy,
+    double? AverageSearchTimeMilliseconds,
+    long SearchCount);

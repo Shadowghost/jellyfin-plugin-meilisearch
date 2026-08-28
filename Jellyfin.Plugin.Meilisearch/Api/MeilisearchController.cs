@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.Meilisearch.Tasks;
 using MediaBrowser.Common.Api;
+using MediaBrowser.Model.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -19,14 +21,19 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 public class MeilisearchController : ControllerBase
 {
     private readonly MeilisearchClientWrapper _client;
+    private readonly ITaskManager _taskManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MeilisearchController"/> class.
     /// </summary>
     /// <param name="client">The Meilisearch client wrapper.</param>
-    public MeilisearchController(MeilisearchClientWrapper client)
+    /// <param name="taskManager">The scheduled task manager, used to start a reindex on request.</param>
+    public MeilisearchController(
+        MeilisearchClientWrapper client,
+        ITaskManager taskManager)
     {
         _client = client;
+        _taskManager = taskManager;
     }
 
     /// <summary>
@@ -65,9 +72,52 @@ public class MeilisearchController : ControllerBase
             IsHealthy: health.IsHealthy,
             IsAuthenticated: health.IsAuthenticated,
             LastIncrementalReindexUtc: Plugin.Instance?.Configuration.LastIncrementalReindexUtc,
-            Error: health.Error);
+            Error: health.Error,
+            MatchingStrategy: _client.EffectiveMatchingStrategy,
+            AverageSearchTimeMilliseconds: _client.AverageSearchTimeMilliseconds,
+            SearchCount: _client.SearchCount);
 
         return Ok(response);
+    }
+
+    /// <summary>
+    /// Drops the current Meilisearch connection so the next request reconnects, then reports the
+    /// resulting health.
+    /// </summary>
+    /// <response code="200">Reconnect attempted; the payload describes the new state.</response>
+    /// <returns>The connection state after reconnecting.</returns>
+    /// <remarks>
+    /// Recreating the client rebuilds its <see cref="System.Net.Http.HttpClient"/>, which clears the
+    /// pooled connection and the cached DNS entry - the reason a recreated Meilisearch container is
+    /// reachable again without restarting Jellyfin. Transient failures already recover on their own;
+    /// this exists for the case where an admin has just fixed something and wants to see it now.
+    /// </remarks>
+    [HttpPost("Reconnect")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<MeilisearchTestConnectionResponse>> Reconnect()
+    {
+        var cancellationToken = HttpContext?.RequestAborted ?? CancellationToken.None;
+        _client.Reconnect();
+        var health = await _client.CheckHealthAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new MeilisearchTestConnectionResponse(health.IsHealthy, health.IsAuthenticated, health.Error));
+    }
+
+    /// <summary>
+    /// Starts the full reindex scheduled task.
+    /// </summary>
+    /// <response code="204">The reindex task was started.</response>
+    /// <returns>No content.</returns>
+    /// <remarks>
+    /// Queued through the task manager rather than run inline, so it survives this HTTP request and
+    /// reports progress on the Scheduled Tasks page. If the task is already running the request is a
+    /// no-op.
+    /// </remarks>
+    [HttpPost("Reindex")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public ActionResult Reindex()
+    {
+        _taskManager.QueueIfNotRunning<ReindexTask>();
+        return NoContent();
     }
 
     /// <summary>
