@@ -4,7 +4,7 @@
     <title>Meilisearch</title>
 </head>
 <body>
-    <div id="configPage" data-role="page" class="page type-interior pluginConfigurationPage configPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div id="configPage" data-role="page" class="page type-interior pluginConfigurationPage configPage" data-require="emby-input,emby-button,emby-checkbox,emby-select">
         <div data-role="content">
             <div class="content-primary">
                 <h1>Meilisearch</h1>
@@ -32,6 +32,20 @@
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="minimumMatchScore" min="0" max="100" step="1" label="Minimum Match Score (0-100)" />
                         <div class="fieldDescription">Results with a match score below this threshold will be filtered out. Set to 0 to include all results. Default: 50</div>
+                    </div>
+                    <div class="selectContainer">
+                        <select is="emby-select" id="matchingStrategy" label="Matching Strategy">
+                            <option value="frequency">Frequency &mdash; drop the most common word first (default)</option>
+                            <option value="last">Last &mdash; drop words from the end of the query</option>
+                            <option value="all">All &mdash; only return items matching every word</option>
+                        </select>
+                        <div class="fieldDescription">
+                            How Meilisearch handles a query it cannot match in full. <em>Frequency</em> discards the word
+                            that appears most often in your library, so &ldquo;the matrix reloaded&rdquo; keeps
+                            &ldquo;reloaded&rdquo;; <em>last</em> discards from the end instead; <em>all</em> trades recall
+                            for precision. <em>Frequency</em> needs Meilisearch 1.11 or newer and falls back to
+                            <em>last</em> automatically on older servers.
+                        </div>
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="syncBatchSize" min="1" step="1" label="Sync Batch Size" />
@@ -69,7 +83,12 @@
                     <br />
                     <div style="margin-bottom: 1em;">
                         <button is="emby-button" type="button" id="testConnectionBtn" class="raised"><span>Test Connection</span></button>
+                        <button is="emby-button" type="button" id="reconnectBtn" class="raised"><span>Reconnect</span></button>
                         <span id="connectionStatus" style="margin-left: 1em;"></span>
+                    </div>
+                    <div class="fieldDescription" style="margin-bottom: 1em;">
+                        <em>Reconnect</em> drops the current connection and dials Meilisearch again &mdash; useful after
+                        moving or recreating the server. Transient failures recover on their own.
                     </div>
                     <div>
                         <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
@@ -82,7 +101,13 @@
                 </div>
                 <div style="margin-top: 2em;">
                     <h2>Reindex</h2>
-                    <p>To rebuild the search index, run the "Rebuild Meilisearch Index" scheduled task from the Scheduled Tasks page.</p>
+                    <p>
+                        Rebuilds the index from scratch. This runs as the &ldquo;Rebuild Meilisearch Index&rdquo;
+                        scheduled task, so you can follow its progress &mdash; and cancel it &mdash; on the
+                        Scheduled Tasks page.
+                    </p>
+                    <button is="emby-button" type="button" id="reindexBtn" class="raised"><span>Rebuild Index</span></button>
+                    <span id="reindexStatus" style="margin-left: 1em;"></span>
                 </div>
             </div>
         </div>
@@ -180,10 +205,25 @@
                 var last = lastReindex ? escapeHtml(lastReindex) : 'never';
                 lines.push('<div><strong>Last incremental sync:</strong> ' + last + '</div>');
 
+                var matchingStrategy = pick(stats, 'MatchingStrategy');
+                if (matchingStrategy) {
+                    lines.push('<div><strong>Matching strategy:</strong> ' + escapeHtml(matchingStrategy) + '</div>');
+                }
+
+                var searchCount = pick(stats, 'SearchCount');
+                var averageSearchTime = pick(stats, 'AverageSearchTimeMilliseconds');
+                if (averageSearchTime === null || averageSearchTime === undefined) {
+                    lines.push('<div><strong>Search time:</strong> no searches yet</div>');
+                } else {
+                    lines.push('<div><strong>Search time:</strong> ' + escapeHtml(Number(averageSearchTime).toFixed(1))
+                        + ' ms average over ' + escapeHtml(formatNumber(searchCount)) + ' searches</div>');
+                }
+
                 var error = pick(stats, 'Error');
                 if (error) {
                     lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(error) + '</div>');
                 }
+
 
                 var fieldDistribution = pick(stats, 'FieldDistribution');
                 if (fieldDistribution) {
@@ -240,6 +280,8 @@
 
                         document.querySelector('#enableRealTimeSync').checked = config.EnableRealTimeSync !== false;
 
+                        document.querySelector('#matchingStrategy').value = config.MatchingStrategy || 'frequency';
+
                         var minScoreInput = document.querySelector('#minimumMatchScore');
                         minScoreInput.value = (config.MinimumMatchScore !== null && config.MinimumMatchScore !== undefined) ? config.MinimumMatchScore : 50;
                         minScoreInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
@@ -256,47 +298,6 @@
                         var synonymsInput = document.querySelector('#synonyms');
                         synonymsInput.value = config.Synonyms || '';
 
-                        Dashboard.hideLoadingMsg();
-                    });
-
-                    refreshStatus();
-                });
-
-            document.querySelector('.configForm')
-                .addEventListener('submit', function (e) {
-                    Dashboard.showLoadingMsg();
-
-                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
-                        config.MeilisearchUrl = document.querySelector('#meilisearchUrl').value;
-                        config.ApiKey = document.querySelector('#apiKey').value;
-                        config.IndexName = document.querySelector('#indexName').value;
-                        config.EnableRealTimeSync = document.querySelector('#enableRealTimeSync').checked;
-                        config.MinimumMatchScore = parseIntOrDefault(document.querySelector('#minimumMatchScore').value, 50);
-                        config.SyncBatchSize = parseIntOrDefault(document.querySelector('#syncBatchSize').value, 500);
-                        config.SyncBatchDebounceMilliseconds = parseIntOrDefault(document.querySelector('#syncBatchDebounceMilliseconds').value, 2000);
-                        config.ReindexBatchSize = parseIntOrDefault(document.querySelector('#reindexBatchSize').value, 2000);
-                        config.ReindexParallelism = parseIntOrDefault(document.querySelector('#reindexParallelism').value, 2);
-                        config.EnableHealthMonitor = document.querySelector('#enableHealthMonitor').checked;
-                        config.HealthCheckIntervalSeconds = parseIntOrDefault(document.querySelector('#healthCheckIntervalSeconds').value, 60);
-                        config.Synonyms = document.querySelector('#synonyms').value;
-
-                        ApiClient.updatePluginConfiguration(MeilisearchPluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
-                    });
-
-                    e.preventDefault();
-                    return false;
-                });
-
-            document.querySelector('#testConnectionBtn')
-                .addEventListener('click', function () {
-                    var statusSpan = document.querySelector('#connectionStatus');
-                    statusSpan.textContent = 'Testing...';
-                    statusSpan.style.color = '';
-
-                    ApiClient.ajax({
-                        type: 'POST',
-                        url: ApiClient.getUrl('Plugins/Meilisearch/TestConnection'),
-                        dataType: 'json'
                     })
                         .then(function (response) {
                             if (pick(response, 'IsAuthenticated')) {
@@ -314,6 +315,60 @@
                         .catch(function (error) {
                             var message = (error && error.message) ? error.message : (error && error.statusText) ? error.statusText : 'request error';
                             statusSpan.textContent = 'Connection failed: ' + message;
+                            statusSpan.style.color = 'red';
+                        });
+                });
+
+            document.querySelector('#reconnectBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#connectionStatus');
+                    statusSpan.textContent = 'Reconnecting...';
+                    statusSpan.style.color = '';
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/Reconnect'),
+                        dataType: 'json'
+                    })
+                        .then(function (response) {
+                            if (pick(response, 'IsAuthenticated')) {
+                                statusSpan.textContent = 'Reconnected.';
+                                statusSpan.style.color = 'green';
+                            } else if (pick(response, 'IsHealthy')) {
+                                statusSpan.textContent = 'Reconnected, but the API key was rejected';
+                                statusSpan.style.color = 'orange';
+                            } else {
+                                var err = pick(response, 'Error') || 'unknown error';
+                                statusSpan.textContent = 'Reconnect failed: ' + err;
+                                statusSpan.style.color = 'red';
+                            }
+
+                            refreshStatus();
+                        })
+                        .catch(function (error) {
+                            var message = (error && error.message) ? error.message : (error && error.statusText) ? error.statusText : 'request error';
+                            statusSpan.textContent = 'Reconnect failed: ' + message;
+                            statusSpan.style.color = 'red';
+                        });
+                });
+
+            document.querySelector('#reindexBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#reindexStatus');
+                    statusSpan.textContent = 'Starting...';
+                    statusSpan.style.color = '';
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/Reindex')
+                    })
+                        .then(function () {
+                            statusSpan.textContent = 'Started. Follow its progress on the Scheduled Tasks page.';
+                            statusSpan.style.color = 'green';
+                        })
+                        .catch(function (error) {
+                            var message = (error && error.message) ? error.message : (error && error.statusText) ? error.statusText : 'request error';
+                            statusSpan.textContent = 'Could not start the reindex: ' + message;
                             statusSpan.style.color = 'red';
                         });
                 });

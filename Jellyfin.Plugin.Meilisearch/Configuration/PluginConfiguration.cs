@@ -9,6 +9,19 @@ namespace Jellyfin.Plugin.Meilisearch.Configuration;
 public class PluginConfiguration : BasePluginConfiguration
 {
     /// <summary>
+    /// The matching strategy used when none is configured. <c>frequency</c> drops the term that is
+    /// most common across the library first, which for media titles beats <c>last</c>'s "drop the
+    /// last word typed" - a search for "the matrix reloaded" keeps "reloaded" and discards "the".
+    /// </summary>
+    public const string DefaultMatchingStrategy = "frequency";
+
+    /// <summary>
+    /// The matching strategy every Meilisearch version supports. Used when the configured value is
+    /// unknown, and as the automatic fallback when the server rejects <see cref="DefaultMatchingStrategy"/>.
+    /// </summary>
+    public const string FallbackMatchingStrategy = "last";
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="PluginConfiguration"/> class.
     /// </summary>
     public PluginConfiguration()
@@ -18,6 +31,7 @@ public class PluginConfiguration : BasePluginConfiguration
         IndexName = "jellyfin";
         EnableRealTimeSync = true;
         MinimumMatchScore = 50;
+        MatchingStrategy = DefaultMatchingStrategy;
         SyncBatchSize = 500;
         SyncBatchDebounceMilliseconds = 2000;
         ReindexBatchSize = 2000;
@@ -54,6 +68,18 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Results with a score below this threshold will be filtered out.
     /// </summary>
     public int? MinimumMatchScore { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Meilisearch matching strategy: <c>frequency</c>, <c>last</c> or <c>all</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>frequency</c> (the default) discards the most common word in the library when a query has
+    /// no exact match; <c>last</c> discards words from the end of the query; <c>all</c> returns only
+    /// documents matching every word, trading recall for precision. <c>frequency</c> requires
+    /// Meilisearch 1.11 or newer - on an older server the plugin notices the rejection once and
+    /// falls back to <see cref="FallbackMatchingStrategy"/> for the rest of the session.
+    /// </remarks>
+    public string MatchingStrategy { get; set; }
 
     /// <summary>
     /// Gets or sets the maximum number of items per real-time sync flush.

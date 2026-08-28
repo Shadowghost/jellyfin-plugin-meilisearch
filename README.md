@@ -11,14 +11,17 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 - Fast full-text search powered by Meilisearch
 - Typo-tolerant search (finds "Strager Things" when you meant "Stranger Things")
 - People-aware search - find titles by actor or director name
+- File-name search - find an item by its release name, not just its metadata
 - Real-time index synchronization with a debounced, coalesced, persisted queue
 - Scheduled tasks for full and incremental reindexing
 - Background health monitor that pauses sync when Meilisearch is unreachable
-- Live status panel (document count, index size, last sync) in the config page
+- Live status panel (document count, index size, last sync, search latency) in the config page
+- Rebuild and reconnect buttons in the config page
 - Custom synonyms (e.g. `mcu=marvel`, `lotr=lord of the rings`)
-- Configurable minimum match score threshold
+- Configurable minimum match score threshold and matching strategy
 - Per-type result quotas, so songs matching an artist name can't crowd out the movies and episodes
 - Automatic reconnect when the Meilisearch container is restarted or gets a new address
+- Automatic incremental sync after every library scan
 - REST endpoints for status and connection testing
 - Supports movies, TV shows, episodes, music, audiobooks, and more
 
@@ -119,6 +122,7 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Index Name | `jellyfin` | Name of the Meilisearch index to use |
 | Enable Real-time Sync | `true` | Automatically update the index when library items change |
 | Minimum Match Score | `50` | Filter out results below this relevance threshold (0-100) |
+| Matching Strategy | `frequency` | How a query that cannot be matched in full is narrowed (see [Matching strategy](#matching-strategy)) |
 | Sync Batch Size | `500` | Max items per real-time sync flush |
 | Sync Debounce (ms) | `2000` | Max wait before flushing a partial sync batch |
 | Reindex Batch Size | `2000` | Items per push during full/incremental reindex |
@@ -158,6 +162,22 @@ knowing:
   just its direct parent, so scoping to a TV library still matches episodes nested under
   seasons under series.
 
+### Matching strategy
+
+When a query has no document matching every word, Meilisearch narrows it until something matches.
+Which word it gives up on is the **Matching Strategy** setting:
+
+| Value | Behaviour |
+|-------|-----------|
+| `frequency` (default) | Drops the word that occurs most often across your library first. A search for "the matrix reloaded" gives up "the" and keeps "reloaded". |
+| `last` | Drops words from the end of the query. The same search gives up "reloaded" and returns every Matrix film, plus anything else matching "the". |
+| `all` | Never narrows: only items matching every word are returned. Precise, and returns nothing when a single word is wrong. |
+
+`frequency` requires Meilisearch 1.11 or newer. On an older server the plugin notices the rejection
+on the first search, logs it once, and uses `last` for the rest of the session - so the setting is
+safe to leave at its default regardless of server version. The **Status** panel shows which strategy
+is actually in use.
+
 ### Index configuration
 
 The plugin owns the index settings and re-applies them whenever the configuration changes.
@@ -165,13 +185,20 @@ They are idempotent, so editing them by hand in Meilisearch will be overwritten.
 
 | Setting | Value |
 |---------|-------|
-| Searchable attributes (in priority order) | `name`, `originalTitle`, `sortName`, `seriesName`, `seasonName`, `albumName`, `artists`, `albumArtists`, `people`, `genres`, `tags`, `studios`, `providerIds.*`, `productionLocations`, `tagline`, `overview` |
+| Searchable attributes (in priority order) | `name`, `originalTitle`, `sortName`, `seriesName`, `seasonName`, `albumName`, `artists`, `albumArtists`, `people`, `genres`, `tags`, `studios`, `providerIds.*`, `productionLocations`, `tagline`, `overview`, `path` |
+| Ranking rules | Meilisearch's defaults, then `typeRank`, `sort`, `productionYear`, `communityRating`, `criticRating` - each one breaking ties left by the one before |
 | Typo tolerance | Enabled; 1 typo from 4 characters, 2 typos from 8 |
 | Displayed attributes | `id` only — the provider consumes nothing else, which keeps search responses small |
 | Synonyms | Taken from the **Synonyms** setting |
 
-Because `name` outranks `overview`, a title match always beats a plot-summary match. Adding
-synonyms is the supported way to tune recall; the attribute order itself is not configurable.
+Because `name` outranks `overview`, a title match always beats a plot-summary match, and because
+`path` comes last a file-name match never outranks either. Adding synonyms is the supported way to
+tune recall; the attribute order itself is not configurable.
+
+`path` holds only the item's file or folder name - `The.Matrix.1999.1080p.mkv`, not
+`/mnt/media/Movies/The Matrix (1999)/The.Matrix.1999.1080p.mkv`. Indexing the directories above an
+item would repeat their words on everything beneath them, which would let a search for "movies"
+match a whole library.
 
 ## Indexing Your Library
 
@@ -193,6 +220,12 @@ doesn't race with incoming events.
 A second scheduled task, **Incremental Meilisearch Sync**, runs hourly by default and
 only indexes items modified since the last incremental run. Use this to keep the index
 fresh without paying the cost of a full rebuild.
+
+The same sweep also runs automatically as soon as a library scan finishes. Real-time sync
+normally indexes what a scan discovers, but not if it was disabled, paused by the health monitor,
+or missed an event - and a scan is when the library and the index are most likely to have drifted.
+On an unchanged library the sweep costs a single query, and it yields if a full reindex is already
+running.
 
 ### Real-time Sync
 
@@ -256,6 +289,8 @@ that logs this warning.** Everything else keeps working in the meantime.
 | Test Connection reports reachable but not authenticated | The **API Key** is wrong or lacks permission. A master key or a key with search + documents + settings + tasks access is required. |
 | Meilisearch was restarted / its container was recreated | Handled automatically: on a communication failure the plugin rebuilds its HTTP client (clearing the pooled connection and cached DNS entry) and retries once. No Jellyfin restart needed. |
 | Fewer results than expected for a fuzzy query | Lower **Minimum Match Score**. It maps to Meilisearch's `rankingScoreThreshold`, so raising it buys precision at the cost of recall. |
+| Too many loosely related results | Set **Matching Strategy** to `all`, which returns only items matching every word of the query. |
+| Log says the `frequency` matching strategy was rejected | The server predates Meilisearch 1.11. The plugin has already fallen back to `last`; upgrade Meilisearch to get `frequency`. |
 | Pending sync operations after an unclean shutdown | They are persisted to a JSON file in the plugin's configuration directory and replayed on the next start. |
 
 ## REST API
@@ -264,8 +299,10 @@ Both endpoints require an authenticated administrator and back the config page's
 
 | Method | Route | Purpose |
 |--------|-------|---------|
-| `GET` | `/Plugins/Meilisearch/Stats` | Document count, index size, indexing state, field distribution, health, authentication state, last incremental sync timestamp |
+| `GET` | `/Plugins/Meilisearch/Stats` | Document count, index size, indexing state, field distribution, health, authentication state, last incremental sync timestamp, matching strategy in use, average search latency |
 | `POST` | `/Plugins/Meilisearch/TestConnection` | Reachability and API-key validation |
+| `POST` | `/Plugins/Meilisearch/Reconnect` | Drops the connection, dials again, and reports the resulting state |
+| `POST` | `/Plugins/Meilisearch/Reindex` | Queues the **Rebuild Meilisearch Index** task |
 
 ## Architecture
 
@@ -274,6 +311,7 @@ Both endpoints require an authenticated administrator and back the config page's
 - **MeilisearchIndexService** - Hosted service running a bounded, debounced, coalescing sync queue with pause/resume support
 - **SyncQueuePersistence** - Persists pending sync ops across plugin restarts
 - **MeilisearchHealthMonitor** - Hosted service that periodically pings Meilisearch and pauses sync when unreachable
-- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/TestConnection`) backing the config-page status panel
+- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/TestConnection`, `/Reconnect`, `/Reindex`) backing the config page
 - **ReindexTask** - Scheduled task for full library reindexing
 - **IncrementalReindexTask** - Hourly scheduled task syncing items modified since the last run
+- **LibraryScanSyncTask** - Post-scan hook that runs the incremental sync once a library scan finishes
