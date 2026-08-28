@@ -7,6 +7,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.Meilisearch.Configuration;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
@@ -38,11 +39,16 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     // Give up on an operation that keeps failing rather than retrying it forever.
     private const int MaxFlushAttempts = 20;
 
+    // Directory separators seen in item paths, held in a field so the lookup does not allocate an
+    // array per document.
+    private static readonly char[] PathSeparators = ['/', '\\'];
+
     // How long shutdown waits for the worker to write out what it has before cancelling it.
     private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(10);
 
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
+    private readonly EmbeddingService _embeddings;
     private readonly ILogger<MeilisearchIndexService> _logger;
     private readonly SyncQueuePersistence _persistence;
 
@@ -69,11 +75,13 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     /// </summary>
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="client">The Meilisearch client wrapper.</param>
+    /// <param name="embeddings">The embedding service used to attach vectors to synced documents.</param>
     /// <param name="logger">The logger.</param>
     /// <param name="applicationPaths">The application paths used to locate the sync queue persistence file.</param>
     public MeilisearchIndexService(
         ILibraryManager libraryManager,
         MeilisearchClientWrapper client,
+        EmbeddingService embeddings,
         ILogger<MeilisearchIndexService> logger,
         IApplicationPaths applicationPaths)
     {
@@ -81,6 +89,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
         _libraryManager = libraryManager;
         _client = client;
+        _embeddings = embeddings;
         _logger = logger;
         _persistence = new SyncQueuePersistence(applicationPaths, logger);
     }
@@ -380,6 +389,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
 
             // Technical.
             Container = item.Container,
+            Path = GetSearchablePath(item.Path),
 
             // External IDs.
             ProviderIds = item.ProviderIds?.Count > 0 ? item.ProviderIds : null,
@@ -501,6 +511,39 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             ExtraType.Trailer => 20,
             _ => 15
         };
+    }
+
+    /// <summary>
+    /// Reduces an item's path to the part worth searching: the file or folder name, without any of
+    /// the directories above it.
+    /// </summary>
+    /// <param name="path">The item's path, which may be null, empty or a virtual path.</param>
+    /// <returns>The last path segment, or null when there is nothing to index.</returns>
+    /// <remarks>
+    /// Directories are dropped rather than indexed. Every level above the item repeats the same words
+    /// across everything beneath it - a library root ("/mnt/media/Movies"), a metadata folder
+    /// ("People") - so indexing them would let a search for "movies" match a whole library. The leaf
+    /// is where the release name lives, which is the only part of a path a user searches for. Paths
+    /// beginning with <c>%</c> are Jellyfin's tokenized virtual paths and are skipped entirely.
+    /// </remarks>
+    internal static string? GetSearchablePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path[0] == '%')
+        {
+            return null;
+        }
+
+        // Both separators appear in practice: a Windows server writes '\', while network paths and
+        // container mounts on the same server can still use '/'.
+        var trimmed = path.TrimEnd(PathSeparators);
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        var lastSeparator = trimmed.LastIndexOfAny(PathSeparators);
+        var leaf = lastSeparator < 0 ? trimmed : trimmed[(lastSeparator + 1)..];
+        return leaf.Length > 0 ? leaf : null;
     }
 
     private static string? TryGetTopParentId(BaseItem item)
@@ -826,6 +869,9 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                 _logger.LogDebug(ex, "Failed to build Meilisearch document for item {ItemId}; skipping", op.Id);
             }
         }
+
+        // Embed before pushing so a document and its vector land in the same Meilisearch task.
+        _embeddings.AttachVectors(docsToIndex, cancellationToken);
 
         var failed = false;
         try

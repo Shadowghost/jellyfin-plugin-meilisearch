@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
@@ -22,6 +23,7 @@ public class IncrementalReindexTask : IScheduledTask
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
     private readonly MeilisearchIndexService _indexService;
+    private readonly EmbeddingService _embeddings;
     private readonly ILogger<IncrementalReindexTask> _logger;
 
     /// <summary>
@@ -30,16 +32,19 @@ public class IncrementalReindexTask : IScheduledTask
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="client">The Meilisearch client wrapper.</param>
     /// <param name="indexService">The index service used to pause real-time sync during the sweep.</param>
+    /// <param name="embeddings">The embedding service used to attach vectors to indexed documents.</param>
     /// <param name="logger">The logger.</param>
     public IncrementalReindexTask(
         ILibraryManager libraryManager,
         MeilisearchClientWrapper client,
         MeilisearchIndexService indexService,
+        EmbeddingService embeddings,
         ILogger<IncrementalReindexTask> logger)
     {
         _libraryManager = libraryManager;
         _client = client;
         _indexService = indexService;
+        _embeddings = embeddings;
         _logger = logger;
     }
 
@@ -254,6 +259,8 @@ public class IncrementalReindexTask : IScheduledTask
 
             if (batch.Count > 0)
             {
+                _embeddings.AttachVectors(batch, cancellationToken);
+
                 batchNumber++;
                 await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                 var batchToSubmit = batch;

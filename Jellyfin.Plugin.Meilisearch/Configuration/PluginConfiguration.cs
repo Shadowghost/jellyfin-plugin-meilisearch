@@ -41,6 +41,15 @@ public class PluginConfiguration : BasePluginConfiguration
         Synonyms = string.Empty;
         LastIncrementalReindexUtc = null;
         IndexSchemaVersion = 0;
+        EnableSemanticSearch = false;
+        AutoDownloadEmbeddingModel = true;
+        EmbeddingModelPath = string.Empty;
+        SemanticRatio = 50;
+        EmbeddingMaxTokens = 256;
+        EmbeddingBatchSize = 8;
+        EmbeddingThreads = 0;
+        EnableEmbeddingCache = true;
+        EmbeddingCacheMaxEntries = 250000;
     }
 
     /// <summary>
@@ -127,4 +136,67 @@ public class PluginConfiguration : BasePluginConfiguration
     /// successful full reindex. Zero means the index predates schema tracking.
     /// </summary>
     public int IndexSchemaVersion { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether semantic (vector) search is enabled.
+    /// </summary>
+    /// <remarks>
+    /// Disabled by default. Turning this on makes the plugin download a local embedding model of
+    /// several hundred megabytes, run it on the CPU for every indexed item, and store a 1024-float
+    /// vector per document in Meilisearch. Nothing about embeddings is loaded or executed while this
+    /// is off, so leaving it off keeps the plugin's footprint exactly as it was before.
+    /// </remarks>
+    public bool EnableSemanticSearch { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the embedding model may be downloaded automatically
+    /// once semantic search is enabled. When false, the model must be fetched with the
+    /// "Download Meilisearch Embedding Model" scheduled task before semantic search becomes active.
+    /// </summary>
+    public bool AutoDownloadEmbeddingModel { get; set; }
+
+    /// <summary>
+    /// Gets or sets the directory the embedding model is stored in. Empty means a
+    /// <c>meilisearch-embeddings</c> directory under Jellyfin's data path.
+    /// </summary>
+    public string EmbeddingModelPath { get; set; }
+
+    /// <summary>
+    /// Gets or sets the balance between keyword and vector matching, 0-100. Zero is pure keyword
+    /// search, 100 is pure vector search.
+    /// </summary>
+    public int SemanticRatio { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum number of tokens embedded per item. Library metadata is short, and
+    /// this caps the cost of the long overviews that dominate inference time.
+    /// </summary>
+    public int EmbeddingMaxTokens { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of documents embedded per forward pass.
+    /// </summary>
+    public int EmbeddingBatchSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of CPU threads used for inference. Zero lets the plugin pick half the
+    /// available processors, leaving headroom for transcoding and the rest of the server.
+    /// </summary>
+    public int EmbeddingThreads { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether computed vectors are kept on disk and reused.
+    /// </summary>
+    /// <remarks>
+    /// On by default. A rebuild re-embeds the whole library, and for the overwhelming majority of
+    /// items the metadata has not changed since the last run, so the vector is identical - this turns
+    /// hours of inference back into a file read. The cost is roughly four kilobytes per item on disk.
+    /// </remarks>
+    public bool EnableEmbeddingCache { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum number of vectors the cache stores, or zero for no limit. A full
+    /// rebuild prunes entries it did not use, so this only bites on libraries larger than the limit.
+    /// </summary>
+    public int EmbeddingCacheMaxEntries { get; set; }
 }

@@ -17,6 +17,7 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 - Background health monitor that pauses sync when Meilisearch is unreachable
 - Live status panel (document count, index size, last sync, search latency) in the config page
 - Rebuild and reconnect buttons in the config page
+- Optional semantic search using a locally run Qwen3-Embedding model (off by default)
 - Custom synonyms (e.g. `mcu=marvel`, `lotr=lord of the rings`)
 - Configurable minimum match score threshold and matching strategy
 - Per-type result quotas, so songs matching an artist name can't crowd out the movies and episodes
@@ -59,6 +60,11 @@ docker run -d -p 7700:7700 -v $(pwd)/meili_data:/meili_data \
 >   **API Key** in the plugin configuration below.
 > - Meilisearch collects [anonymous analytics by default](https://www.meilisearch.com/docs/resources/self_hosting/configuration/reference#disable-analytics)
 >   (opt-out). `MEILI_NO_ANALYTICS=true` disables it.
+
+### For semantic search (optional)
+
+- Meilisearch 1.10 or newer, for vector search support
+- ~610 MB of free disk space for the model, and roughly 1-2 GB of RAM while it is loaded
 
 ### Build Requirements
 
@@ -105,7 +111,14 @@ dotnet build -c Release
 ### Manual installation
 
 1. Build the plugin as described above.
-2. Copy `Jellyfin.Plugin.Meilisearch.dll` to your Jellyfin plugins directory:
+2. Copy these from `bin/Release/net10.0/` to your Jellyfin plugins directory:
+   - `Jellyfin.Plugin.Meilisearch.dll` and `Meilisearch.dll`
+   - For semantic search only: `Microsoft.ML.OnnxRuntime.dll`, `Microsoft.ML.Tokenizers.dll`,
+     `System.Numerics.Tensors.dll`, `Google.Protobuf.dll`, and the `runtimes/` directory
+     (keeping its structure — the plugin looks for the native library both next to itself and
+     under `runtimes/<rid>/native/`). Omit all of these to run keyword-only.
+
+   The plugins directory is:
    - Linux: `~/.local/share/jellyfin/plugins/Meilisearch/`
    - Windows: `%APPDATA%\jellyfin\plugins\Meilisearch\`
    - Docker: `/config/plugins/Meilisearch/`
@@ -130,6 +143,13 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Enable Health Monitor | `true` | Periodically pings Meilisearch and pauses sync when unreachable |
 | Health Check Interval (s) | `60` | How often the health monitor runs |
 | Synonyms | (empty) | One per line: `term=alt1,alt2` |
+| Enable Semantic Search | `false` | Meaning-based matching via a local embedding model (see [Semantic Search](#semantic-search)) |
+| Download the model automatically | `true` | Fetch the embedding model as soon as semantic search is enabled |
+| Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning |
+| Max Tokens per Item | `256` | How much of each item's metadata is embedded |
+| Embedding Batch Size | `8` | Items per inference pass |
+| Inference Threads | `0` | 0 uses half the available CPU cores |
+| Model Directory | (empty) | Empty means `<jellyfin-data>/meilisearch-embeddings` |
 
 Use the **Test Connection** button to verify connectivity and that your API key is valid. The **Status** panel shows the live document count, index size, last incremental sync time, and field distribution.
 
@@ -199,6 +219,85 @@ tune recall; the attribute order itself is not configurable.
 `/mnt/media/Movies/The Matrix (1999)/The.Matrix.1999.1080p.mkv`. Indexing the directories above an
 item would repeat their words on everything beneath them, which would let a search for "movies"
 match a whole library.
+
+## Semantic Search
+
+Off by default. When enabled, the plugin embeds each indexed item and each query with
+[Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) and asks Meilisearch
+for a hybrid keyword + vector search. That finds items whose words never appear in the query:
+
+| Query | Finds |
+|-------|-------|
+| `space movie with a robot` | WALL·E |
+| `cooking show about famous chefs` | Chef's Table |
+| `caped crusader in gotham` | The Dark Knight |
+
+The model runs **locally, inside the Jellyfin process**. No embedding service, API key or
+outbound request is involved beyond the one-time model download, and no library data leaves
+your server.
+
+### What it costs
+
+Be deliberate about turning this on — it is a real trade, which is why it ships disabled:
+
+- **~610 MB download**, once, into the model directory.
+- **~1-2 GB of RAM** while the model is loaded.
+- **CPU time per item.** Every indexed item needs a forward pass. The first full rebuild of a large
+  library takes hours rather than minutes, and the incremental sync and real-time queue pay the
+  same cost per changed item. Inference defaults to half your CPU cores to leave headroom for
+  transcoding. Later rebuilds are much cheaper thanks to the vector cache below.
+- **~4 KB per item on disk** for that cache, under Jellyfin's data directory.
+- **Index growth.** Meilisearch stores a 1024-dimension float vector per document.
+
+Queries themselves stay fast: one short forward pass for the search term, then Meilisearch does
+the vector comparison.
+
+### Enabling it
+
+1. Tick **Enable semantic search** in the plugin configuration and save. With automatic download
+   left on, the model is fetched in the background; otherwise run the **Download Meilisearch
+   Embedding Model** scheduled task. The **Status** panel reports `Ready` when the model is loaded.
+2. Run **Rebuild Meilisearch Index**. Vectors are written as items are indexed, so documents
+   already in the index have none until you rebuild.
+
+Search keeps working normally throughout. Until the model is loaded, and for any document without
+a vector, queries fall back to pure keyword matching — enabling semantic search never makes search
+unavailable, only gradually better as vectors land.
+
+Turning the setting off releases the model and removes the embedder from Meilisearch, which drops
+the stored vectors and reclaims the index space.
+
+### Tuning
+
+**Semantic Ratio** is the dial that matters. At 0 vectors are ignored; at 100 keyword matching is
+ignored, and exact title searches get noticeably worse — a vector search for `Alien` happily returns
+every science-fiction film. The default of 50 keeps exact titles winning while letting descriptive
+queries work. If precise titles start losing to thematically similar items, lower it.
+
+**Cache computed vectors on disk** is on by default and worth leaving on. It is persistent: it lives
+in `meilisearch-embedding-cache` under Jellyfin's data directory (not the cache directory, which
+routine cleanups empty) and is reopened on every start, so restarting Jellyfin — or having it killed
+outright — costs nothing. Vectors reach the operating system as they are computed, and are forced out
+to disk every thousand entries, at the end of a rebuild and on shutdown, so even a host that loses
+power gives up at most a few seconds of re-embedding. A half-written tail from such a crash is
+detected and discarded on the next open rather than being read back as a corrupt vector. A rebuild re-embeds the
+whole library, but for items whose metadata has not changed since the last run the text handed to
+the model is byte-identical, so the vector is too — the cache turns that forward pass back into a
+file read, which is the difference between a rebuild taking hours and taking minutes. Edited items
+miss the cache and are re-embedded, exactly as they should be. A clean full rebuild also prunes
+cached vectors it no longer needed, so the cache tracks the library rather than growing forever;
+**Cache Size Limit** is a backstop for libraries larger than the limit. The **Status** panel reports
+how many vectors are cached and how many lookups this session were served from it.
+
+**Max Tokens per Item** trades indexing time for context. The embedded text is ordered
+title → series/album → artists → type → year → genres → studios → tags → people → tagline →
+overview, and truncation drops from the end, so a low value keeps the identifying fields and gives
+up the overview.
+
+> **The model is not configurable, by design.** The tokenizer, the 1024-dimension output, the
+> key/value head geometry, last-token pooling and the query instruction prefix are all specific to
+> Qwen3-Embedding-0.6B. Pointing the plugin at a different model would not swap the model out, it
+> would produce vectors of the right shape and wrong meaning. Changing models is a code change.
 
 ## Indexing Your Library
 
@@ -292,6 +391,12 @@ that logs this warning.** Everything else keeps working in the meantime.
 | Too many loosely related results | Set **Matching Strategy** to `all`, which returns only items matching every word of the query. |
 | Log says the `frequency` matching strategy was rejected | The server predates Meilisearch 1.11. The plugin has already fallen back to `last`; upgrade Meilisearch to get `frequency`. |
 | Pending sync operations after an unclean shutdown | They are persisted to a JSON file in the plugin's configuration directory and replayed on the next start. |
+| Status shows semantic search `Failed` | The log carries the reason. Most often the model download was interrupted (delete the model directory and retry) or the ONNX Runtime native library could not be loaded on this platform. Keyword search is unaffected either way. |
+| Status shows `Model not downloaded` | Automatic download is off. Run the **Download Meilisearch Embedding Model** task. |
+| Semantic search is `Ready` but results are unchanged | The existing documents have no vectors yet. Run **Rebuild Meilisearch Index**. |
+| Registering the embedder failed | Vector search needs Meilisearch 1.10 or newer. Older servers keep working as keyword-only. |
+| A rebuild re-embeds everything even though nothing changed | The vector cache was reset. It is discarded when the model or its vector width changes, and starts empty after the setting is first turned on. |
+| Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. |
 
 ## REST API
 
@@ -315,3 +420,10 @@ Both endpoints require an authenticated administrator and back the config page's
 - **ReindexTask** - Scheduled task for full library reindexing
 - **IncrementalReindexTask** - Hourly scheduled task syncing items modified since the last run
 - **LibraryScanSyncTask** - Post-scan hook that runs the incremental sync once a library scan finishes
+- **EmbeddingService** - Hosted service owning the embedding model's lifecycle; a no-op while semantic search is off
+- **OnnxTextEmbedder** - ONNX Runtime inference, last-token pooling and L2 normalization
+- **EmbeddingCache** - Disk-backed store of computed vectors keyed by the exact text they came from, so a rebuild reuses them instead of recomputing
+- **QwenEmbeddingTokenizer** / **QwenPreTokenizer** - The model's byte-level BPE tokenizer and its split pattern
+- **EmbeddingModelDownloader** - Fetches the model to a temporary file and moves it into place, so an interrupted download never looks complete
+- **OnnxRuntimeNativeLoader** - Resolves ONNX Runtime's native library from the plugin directory, which the default RID probing does not reach inside a plugin load context
+- **DownloadEmbeddingModelTask** - Scheduled task to fetch the model on demand

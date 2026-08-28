@@ -12,7 +12,7 @@ public class MeilisearchDocument
     /// <summary>
     /// The version of the document schema produced by this build of the plugin.
     /// </summary>
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
 
     /// <summary>
     /// Gets or sets the item ID (GUID as string).
@@ -202,6 +202,17 @@ public class MeilisearchDocument
     public string? Container { get; set; }
 
     /// <summary>
+    /// Gets or sets the item's file or folder name, so a release name can be searched for directly.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the leaf only, not the full path. Directories above the item repeat the same
+    /// words on everything beneath them ("/mnt/media/Movies"), so indexing them would make a search
+    /// for "movies" match an entire library.
+    /// </remarks>
+    [JsonPropertyName("path")]
+    public string? Path { get; set; }
+
+    /// <summary>
     /// Gets or sets the provider IDs (IMDB, TVDB, TMDB, etc.).
     /// </summary>
     [JsonPropertyName("providerIds")]
@@ -232,4 +243,12 @@ public class MeilisearchDocument
     /// </summary>
     [JsonPropertyName("_rankingScore")]
     public double? RankingScore { get; set; }
+
+    /// <summary>
+    /// Gets or sets the user-provided embeddings, keyed by embedder name.
+    /// Null - and therefore omitted from the payload entirely - unless semantic search is enabled.
+    /// </summary>
+    [JsonPropertyName("_vectors")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, MeilisearchVector>? Vectors { get; set; }
 }

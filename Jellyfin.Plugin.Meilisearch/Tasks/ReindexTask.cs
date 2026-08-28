@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
@@ -50,6 +51,7 @@ public class ReindexTask : IScheduledTask
     private readonly ILibraryManager _libraryManager;
     private readonly MeilisearchClientWrapper _client;
     private readonly MeilisearchIndexService _indexService;
+    private readonly EmbeddingService _embeddings;
     private readonly ILogger<ReindexTask> _logger;
 
     /// <summary>
@@ -58,16 +60,19 @@ public class ReindexTask : IScheduledTask
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="client">The Meilisearch client wrapper.</param>
     /// <param name="indexService">The index service used to pause real-time sync during reindex.</param>
+    /// <param name="embeddings">The embedding service used to attach vectors to indexed documents.</param>
     /// <param name="logger">The logger.</param>
     public ReindexTask(
         ILibraryManager libraryManager,
         MeilisearchClientWrapper client,
         MeilisearchIndexService indexService,
+        EmbeddingService embeddings,
         ILogger<ReindexTask> logger)
     {
         _libraryManager = libraryManager;
         _client = client;
         _indexService = indexService;
+        _embeddings = embeddings;
         _logger = logger;
     }
 
@@ -161,11 +166,30 @@ public class ReindexTask : IScheduledTask
         // modified during this reindex.
         var runStart = DateTime.UtcNow;
 
+        // Load the model (downloading it if allowed) before the index is reset, so a full rebuild
+        // either embeds every document or none of them - never a confusing half-vectorized index.
+        if (_embeddings.IsEnabled
+            && !await _embeddings.EnsureReadyAsync(null, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogWarning(
+                "Semantic search is enabled but the embedding model is not available ({Error}); reindexing without vectors",
+                _embeddings.Error);
+        }
+
+        var completedCleanly = false;
+
         _logger.LogInformation("Pausing real-time sync");
         await _indexService.PauseAsync(cancellationToken).ConfigureAwait(false);
 
         try
         {
+            // Opened inside the try so the finally below always closes it again. A full rebuild
+            // embeds every item in the library, which makes it both the run that benefits most from
+            // the vector cache and the only point at which we can tell which cached vectors are still
+            // in use: entries this run never touches belong to metadata that has since been edited or
+            // to items that have since been deleted.
+            _embeddings.BeginCacheRetention();
+
             _logger.LogInformation("Resetting Meilisearch index");
             await _client.ResetIndexAsync(cancellationToken).ConfigureAwait(false);
             progress.Report(2);
@@ -278,6 +302,10 @@ public class ReindexTask : IScheduledTask
 
                 if (batch.Count > 0)
                 {
+                    // Embed on this thread rather than inside the parallel push below: inference is
+                    // already internally parallel, and overlapping batches would oversubscribe the CPU.
+                    _embeddings.AttachVectors(batch, cancellationToken);
+
                     batchNumber++;
                     await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var batchToSubmit = batch;
@@ -359,7 +387,12 @@ public class ReindexTask : IScheduledTask
                 _logger.LogError(
                     "Meilisearch reindex did not complete cleanly, so the index is incomplete - re-run this task. The incremental sync watermark was left unchanged");
             }
-            else if (plugin is not null)
+            else
+            {
+                completedCleanly = true;
+            }
+
+            if (completedCleanly && plugin is not null)
             {
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
                 plugin.Configuration.IndexSchemaVersion = MeilisearchDocument.SchemaVersion;
@@ -378,6 +411,9 @@ public class ReindexTask : IScheduledTask
             {
                 _logger.LogWarning(ex, "Error resuming real-time sync after reindex");
             }
+
+            // Only a clean run saw the whole library, so only a clean run may prune what it missed.
+            _embeddings.EndCacheRetention(completedCleanly);
         }
     }
 }

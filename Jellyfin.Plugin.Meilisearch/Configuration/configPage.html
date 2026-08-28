@@ -80,6 +80,69 @@
                             field-sizing: content; min-height: 8em;"></textarea>
                         <div class="fieldDescription">Each line maps a term to comma-separated alternatives, e.g. <code>movie=film,picture</code>.</div>
                     </div>
+                    <h3 style="margin-top: 1.5em;">Semantic Search</h3>
+                    <div class="fieldDescription" style="margin-bottom: 1em;">
+                        Adds meaning-based matching on top of keyword search, so &ldquo;space movie with a robot&rdquo; can
+                        find <em>WALL&middot;E</em>. It runs a Qwen3-Embedding-0.6B model locally &mdash; no external
+                        service and no data leaves your server &mdash; but it downloads about 610&nbsp;MB once and then
+                        costs CPU time for every indexed item. Leave it off unless you want that trade.
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="enableSemanticSearch" />
+                        <span>Enable semantic search</span>
+                    </label>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="autoDownloadEmbeddingModel" />
+                        <span>Download the model automatically</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        When off, run the <em>Download Meilisearch Embedding Model</em> scheduled task instead.
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="semanticRatio" min="0" max="100" step="1" label="Semantic Ratio (0-100)" />
+                        <div class="fieldDescription">0 is pure keyword search, 100 is pure meaning. Default: 50</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
+                        <div class="fieldDescription">How much of each item's metadata is embedded. Higher is slower. Default: 256</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="embeddingBatchSize" min="1" max="64" step="1" label="Embedding Batch Size" />
+                        <div class="fieldDescription">Items per forward pass. Default: 8</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />
+                        <div class="fieldDescription">
+                            0 uses half your CPU cores, leaving headroom for transcoding. Default: 0
+                        </div>
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="enableEmbeddingCache" />
+                        <span>Cache computed vectors on disk</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        A rebuild re-embeds the whole library, and for items whose metadata has not changed the vector
+                        is identical &mdash; the cache turns that back into a file read instead of hours of CPU. Costs
+                        about 4&nbsp;KB per item on disk, kept under Jellyfin's data directory and reloaded on every
+                        restart. Leave this on unless disk space is tight.
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="embeddingCacheMaxEntries" min="0" step="1000" label="Cache Size Limit (items, 0 = unlimited)" />
+                        <div class="fieldDescription">
+                            A rebuild drops cached vectors it no longer needs, so this only bites on libraries larger
+                            than the limit. Default: 250000
+                        </div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="embeddingModelPath" label="Model Directory (optional)" />
+                        <div class="fieldDescription">
+                            Leave empty to store the model under Jellyfin's data directory.
+                        </div>
+                    </div>
+                    <div class="fieldDescription" style="margin-bottom: 1em;">
+                        <strong>After enabling this, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong> Vectors are
+                        written as items are indexed, so existing documents have none until you rebuild.
+                    </div>
                     <br />
                     <div style="margin-bottom: 1em;">
                         <button is="emby-button" type="button" id="testConnectionBtn" class="raised"><span>Test Connection</span></button>
@@ -224,6 +287,48 @@
                     lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(error) + '</div>');
                 }
 
+                if (pick(stats, 'SemanticSearchEnabled')) {
+                    var embeddingState = pick(stats, 'EmbeddingState') || 'Unknown';
+                    var stateColors = {
+                        Ready: 'green',
+                        Initializing: 'orange',
+                        NotDownloaded: 'orange',
+                        Failed: 'red'
+                    };
+                    var stateLabels = {
+                        Ready: '✓ Ready',
+                        Initializing: 'Downloading or loading…',
+                        NotDownloaded: 'Model not downloaded',
+                        Failed: '✗ Failed'
+                    };
+                    lines.push('<div style="margin-top: 0.5em;"><strong>Semantic search:</strong> <span style="color:'
+                        + (stateColors[embeddingState] || 'inherit') + ';">'
+                        + escapeHtml(stateLabels[embeddingState] || embeddingState) + '</span></div>');
+
+                    var modelDirectory = pick(stats, 'EmbeddingModelDirectory');
+                    if (modelDirectory) {
+                        lines.push('<div><strong>Model directory:</strong> ' + escapeHtml(modelDirectory) + '</div>');
+                    }
+
+                    var cacheCount = pick(stats, 'EmbeddingCacheCount');
+                    if (cacheCount !== null && cacheCount !== undefined) {
+                        var cacheLine = '<div><strong>Vector cache:</strong> '
+                            + escapeHtml(formatNumber(cacheCount)) + ' vectors';
+                        var hitRate = pick(stats, 'EmbeddingCacheHitRate');
+                        if (hitRate !== null && hitRate !== undefined) {
+                            cacheLine += ', ' + escapeHtml((hitRate * 100).toFixed(1)) + '% reused this session';
+                        }
+                        lines.push(cacheLine + '</div>');
+                    }
+
+                    var embeddingError = pick(stats, 'EmbeddingError');
+                    if (embeddingError) {
+                        lines.push('<div style="color:red;"><strong>Embedding error:</strong> '
+                            + escapeHtml(embeddingError) + '</div>');
+                    }
+                } else {
+                    lines.push('<div style="margin-top: 0.5em;"><strong>Semantic search:</strong> disabled</div>');
+                }
 
                 var fieldDistribution = pick(stats, 'FieldDistribution');
                 if (fieldDistribution) {
@@ -298,6 +403,67 @@
                         var synonymsInput = document.querySelector('#synonyms');
                         synonymsInput.value = config.Synonyms || '';
 
+                        document.querySelector('#enableSemanticSearch').checked = config.EnableSemanticSearch === true;
+                        document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
+                        setNumericInput('#semanticRatio', config.SemanticRatio, 50);
+                        setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
+                        setNumericInput('#embeddingBatchSize', config.EmbeddingBatchSize, 8);
+                        setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
+                        document.querySelector('#enableEmbeddingCache').checked = config.EnableEmbeddingCache !== false;
+                        setNumericInput('#embeddingCacheMaxEntries', config.EmbeddingCacheMaxEntries, 250000);
+                        document.querySelector('#embeddingModelPath').value = config.EmbeddingModelPath || '';
+
+                        Dashboard.hideLoadingMsg();
+                    });
+
+                    refreshStatus();
+                });
+
+            document.querySelector('.configForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                        config.MeilisearchUrl = document.querySelector('#meilisearchUrl').value;
+                        config.ApiKey = document.querySelector('#apiKey').value;
+                        config.IndexName = document.querySelector('#indexName').value;
+                        config.EnableRealTimeSync = document.querySelector('#enableRealTimeSync').checked;
+                        config.MinimumMatchScore = parseIntOrDefault(document.querySelector('#minimumMatchScore').value, 50);
+                        config.MatchingStrategy = document.querySelector('#matchingStrategy').value || 'frequency';
+                        config.SyncBatchSize = parseIntOrDefault(document.querySelector('#syncBatchSize').value, 500);
+                        config.SyncBatchDebounceMilliseconds = parseIntOrDefault(document.querySelector('#syncBatchDebounceMilliseconds').value, 2000);
+                        config.ReindexBatchSize = parseIntOrDefault(document.querySelector('#reindexBatchSize').value, 2000);
+                        config.ReindexParallelism = parseIntOrDefault(document.querySelector('#reindexParallelism').value, 2);
+                        config.EnableHealthMonitor = document.querySelector('#enableHealthMonitor').checked;
+                        config.HealthCheckIntervalSeconds = parseIntOrDefault(document.querySelector('#healthCheckIntervalSeconds').value, 60);
+                        config.Synonyms = document.querySelector('#synonyms').value;
+                        config.EnableSemanticSearch = document.querySelector('#enableSemanticSearch').checked;
+                        config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
+                        config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 50);
+                        config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
+                        config.EmbeddingBatchSize = parseIntOrDefault(document.querySelector('#embeddingBatchSize').value, 8);
+                        config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
+                        config.EnableEmbeddingCache = document.querySelector('#enableEmbeddingCache').checked;
+                        config.EmbeddingCacheMaxEntries = parseIntOrDefault(document.querySelector('#embeddingCacheMaxEntries').value, 250000);
+                        config.EmbeddingModelPath = document.querySelector('#embeddingModelPath').value;
+
+                        ApiClient.updatePluginConfiguration(MeilisearchPluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+
+            document.querySelector('#testConnectionBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#connectionStatus');
+                    statusSpan.textContent = 'Testing...';
+                    statusSpan.style.color = '';
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/TestConnection'),
+                        dataType: 'json'
                     })
                         .then(function (response) {
                             if (pick(response, 'IsAuthenticated')) {

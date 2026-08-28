@@ -14,6 +14,12 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="IsAuthenticated">Whether the configured API key is accepted by Meilisearch.</param>
 /// <param name="LastIncrementalReindexUtc">Timestamp of the last incremental reindex run, if any.</param>
 /// <param name="Error">Optional error message when the connection or auth check failed.</param>
+/// <param name="SemanticSearchEnabled">Whether semantic search is switched on in the configuration.</param>
+/// <param name="EmbeddingState">The embedding model's lifecycle state.</param>
+/// <param name="EmbeddingModelDirectory">Where the embedding model is stored on disk.</param>
+/// <param name="EmbeddingError">Optional error message from the last embedding initialization attempt.</param>
+/// <param name="EmbeddingCacheCount">Number of vectors held in the on-disk embedding cache, or null when it is not open.</param>
+/// <param name="EmbeddingCacheHitRate">Share of embedding lookups served from that cache since it was opened, 0.0-1.0, or null before the first lookup.</param>
 /// <param name="MatchingStrategy">The Meilisearch matching strategy queries are currently sent with.</param>
 /// <param name="AverageSearchTimeMilliseconds">Rolling average round-trip time of search requests, or null before the first search.</param>
 /// <param name="SearchCount">Number of search requests issued since startup.</param>
@@ -26,6 +32,12 @@ public sealed record MeilisearchStatsResponse(
     bool IsAuthenticated,
     DateTime? LastIncrementalReindexUtc,
     string? Error,
+    bool SemanticSearchEnabled,
+    string EmbeddingState,
+    string? EmbeddingModelDirectory,
+    string? EmbeddingError,
+    int? EmbeddingCacheCount,
+    double? EmbeddingCacheHitRate,
     string MatchingStrategy,
     double? AverageSearchTimeMilliseconds,
     long SearchCount);

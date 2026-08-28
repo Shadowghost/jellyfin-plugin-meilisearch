@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Logging;
@@ -17,18 +18,22 @@ namespace Jellyfin.Plugin.Meilisearch;
 public class MeilisearchSearchProvider : IExternalSearchProvider
 {
     private readonly MeilisearchClientWrapper _client;
+    private readonly EmbeddingService _embeddings;
     private readonly ILogger<MeilisearchSearchProvider> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MeilisearchSearchProvider"/> class.
     /// </summary>
     /// <param name="client">The Meilisearch client wrapper.</param>
+    /// <param name="embeddings">The embedding service used for semantic search.</param>
     /// <param name="logger">The logger.</param>
     public MeilisearchSearchProvider(
         MeilisearchClientWrapper client,
+        EmbeddingService embeddings,
         ILogger<MeilisearchSearchProvider> logger)
     {
         _client = client;
+        _embeddings = embeddings;
         _logger = logger;
     }
 
@@ -58,6 +63,11 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
         var effectiveTypes = query.IncludeItemTypes;
         var nonTypeFilter = BuildNonTypeFilter(query);
 
+        // Null unless semantic search is enabled and the model is already loaded. Embedding a query
+        // costs a forward pass, so this deliberately never waits for a load or a download - a search
+        // issued before the model is ready simply runs as keyword-only.
+        var queryVector = _embeddings.EmbedQuery(query.SearchTerm, cancellationToken);
+
         IReadOnlyList<(string Id, double Score)> results;
         try
         {
@@ -71,6 +81,7 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
                     effectiveTypes,
                     totalLimit,
                     nonTypeFilter,
+                    queryVector,
                     cancellationToken).ConfigureAwait(false);
             }
             else
@@ -86,6 +97,7 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
                     query.SearchTerm,
                     totalLimit,
                     filter,
+                    queryVector,
                     cancellationToken).ConfigureAwait(false);
             }
         }

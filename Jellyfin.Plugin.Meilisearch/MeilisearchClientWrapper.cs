@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.Meilisearch.Configuration;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using Meilisearch;
 using Microsoft.Extensions.Logging;
 
@@ -126,12 +127,14 @@ public class MeilisearchClientWrapper : IDisposable
     /// <param name="searchTerm">The search term.</param>
     /// <param name="limit">Maximum number of results.</param>
     /// <param name="filter">Optional Meilisearch filter expression.</param>
+    /// <param name="queryVector">Optional query embedding. When supplied the query runs as a hybrid keyword/vector search.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>List of search results with IDs and scores.</returns>
     public async Task<IReadOnlyList<(string Id, double Score)>> SearchAsync(
         string searchTerm,
         int limit,
         string? filter,
+        double[]? queryVector,
         CancellationToken cancellationToken)
     {
         if (!IsConfigured)
@@ -159,6 +162,8 @@ public class MeilisearchClientWrapper : IDisposable
                         searchParams.RankingScoreThreshold = minScore / 100m;
                     }
 
+                    ApplyHybrid(searchParams, queryVector);
+
                     var stopwatch = Stopwatch.StartNew();
                     var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
                     RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
@@ -185,6 +190,7 @@ public class MeilisearchClientWrapper : IDisposable
     /// <param name="types">The item types to query, one Meilisearch query per type.</param>
     /// <param name="totalLimit">Maximum total number of results across all types.</param>
     /// <param name="extraFilter">Optional Meilisearch filter expression applied on top of the per-type filter.</param>
+    /// <param name="queryVector">Optional query embedding. When supplied every sub-query runs as a hybrid keyword/vector search.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Merged, de-duplicated list of (id, score) tuples, capped at <paramref name="totalLimit"/>.</returns>
     public async Task<IReadOnlyList<(string Id, double Score)>> MultiTypeSearchAsync(
@@ -192,6 +198,7 @@ public class MeilisearchClientWrapper : IDisposable
         IReadOnlyList<BaseItemKind> types,
         int totalLimit,
         string? extraFilter,
+        double[]? queryVector,
         CancellationToken cancellationToken)
     {
         if (!IsConfigured || types.Count == 0)
@@ -238,6 +245,8 @@ public class MeilisearchClientWrapper : IDisposable
                         {
                             sq.RankingScoreThreshold = threshold;
                         }
+
+                        ApplyHybrid(sq, queryVector);
 
                         queries.Add(sq);
                     }
@@ -831,6 +840,30 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
+    /// Turns a query into a hybrid keyword/vector search when a query embedding is available.
+    /// </summary>
+    /// <param name="query">The query to augment.</param>
+    /// <param name="queryVector">The query embedding, or null to leave the query as pure keyword search.</param>
+    /// <remarks>
+    /// The embedder is registered as <c>userProvided</c>, so Meilisearch cannot embed the query
+    /// itself - the vector has to travel with the request.
+    /// </remarks>
+    private static void ApplyHybrid(SearchQuery query, double[]? queryVector)
+    {
+        if (queryVector is null || queryVector.Length == 0)
+        {
+            return;
+        }
+
+        query.Vector = queryVector;
+        query.Hybrid = new HybridSearch
+        {
+            Embedder = EmbeddingService.EmbedderName,
+            SemanticRatio = Math.Clamp(Configuration.SemanticRatio, 0, 100) / 100d
+        };
+    }
+
+    /// <summary>
     /// Builds a cache key composed of the URL, API key and index name.
     /// </summary>
     private static string BuildCacheKey(PluginConfiguration config)
@@ -839,7 +872,9 @@ public class MeilisearchClientWrapper : IDisposable
             "|",
             config.ApiKey ?? string.Empty,
             "|",
-            config.IndexName ?? string.Empty);
+            config.IndexName ?? string.Empty,
+            "|",
+            config.EnableSemanticSearch ? "vec" : "novec");
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -1059,6 +1094,8 @@ public class MeilisearchClientWrapper : IDisposable
         // Restrict displayed attributes - the search provider only consumes id + _rankingScore.
         await index.UpdateDisplayedAttributesAsync(["id"], cancellationToken).ConfigureAwait(false);
 
+        await ConfigureEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
+
         // Apply synonyms from configuration.
         var lastSettingsTask = await index.UpdateSynonymsAsync(ParseSynonyms(Configuration.Synonyms), cancellationToken).ConfigureAwait(false);
         if (isNewIndex)
@@ -1067,6 +1104,60 @@ public class MeilisearchClientWrapper : IDisposable
                 .WaitForTaskAsync(lastSettingsTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken)
                 .ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Registers or removes the vector field depending on whether semantic search is enabled.
+    /// </summary>
+    /// <remarks>
+    /// Registered as <c>userProvided</c>: the plugin runs the model locally and ships the vectors with
+    /// each document, so Meilisearch never needs an embedding service of its own or network access to
+    /// one. Removing the embedder when semantic search is turned off also drops the stored vectors,
+    /// which is what reclaims the index space.
+    /// </remarks>
+    private async Task ConfigureEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (Configuration.EnableSemanticSearch)
+            {
+                await index.UpdateEmbeddersAsync(
+                    new Dictionary<string, Embedder>(StringComparer.Ordinal)
+                    {
+                        [EmbeddingService.EmbedderName] = new Embedder
+                        {
+                            Source = EmbedderSource.UserProvided,
+                            Dimensions = EmbeddingService.Dimensions
+                        }
+                    },
+                    cancellationToken).ConfigureAwait(false);
+
+                _logger.LogInformation(
+                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions)",
+                    EmbeddingService.EmbedderName,
+                    EmbeddingService.Dimensions);
+                return;
+            }
+
+            var existing = await index.GetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
+            if (existing is { Count: > 0 })
+            {
+                _logger.LogInformation("Semantic search is off; removing the Meilisearch embedder and its stored vectors");
+                await index.ResetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#pragma warning disable CA1031 // Vector support is optional; keyword search must survive its absence.
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not configure the Meilisearch embedder. Vector search needs Meilisearch 1.10 or newer; keyword search is unaffected");
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>
