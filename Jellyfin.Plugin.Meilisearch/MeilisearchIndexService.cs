@@ -131,8 +131,25 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         // Deliberately not awaited. Restoring resolves every persisted id through the library, which
         // is up to ChannelCapacity database round-trips, and hosted services start before Jellyfin
         // runs its startup tasks - so awaiting here would hold up the whole server and would do the
-        // lookups before the library's static dependencies are even wired up.
-        _restoreTask = Task.Run(() => RestorePersistedOpsAsync(workerToken), CancellationToken.None);
+        // lookups before the library's static dependencies are even wired up. Nothing observes the
+        // result until shutdown, so it swallows its own failures rather than faulting quietly.
+        _restoreTask = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await RestorePersistedOpsAsync(workerToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (workerToken.IsCancellationRequested)
+                {
+                    // Shutting down before the restore finished; the queue file stays on disk.
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Restoring the persisted Meilisearch sync queue failed");
+                }
+            },
+            CancellationToken.None);
 
         _logger.LogInformation("Meilisearch index service started");
         return Task.CompletedTask;
@@ -624,19 +641,43 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         }
     }
 
+    // These run inside Jellyfin's own library event dispatch. Anything that escapes them lands in
+    // library code that had no reason to expect it, so an item this plugin cannot classify drops its
+    // own sync rather than interrupting whatever scan or import raised the event.
     private void OnItemAdded(object? sender, ItemChangeEventArgs e)
     {
-        EnqueueUpsert(e.Item);
+        try
+        {
+            EnqueueUpsert(e?.Item);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to queue a Meilisearch sync for an added item");
+        }
     }
 
     private void OnItemUpdated(object? sender, ItemChangeEventArgs e)
     {
-        EnqueueUpsert(e.Item);
+        try
+        {
+            EnqueueUpsert(e?.Item);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to queue a Meilisearch sync for an updated item");
+        }
     }
 
     private void OnItemRemoved(object? sender, ItemChangeEventArgs e)
     {
-        EnqueueRemove(e.Item);
+        try
+        {
+            EnqueueRemove(e?.Item);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to queue a Meilisearch sync for a removed item");
+        }
     }
 
     private void EnqueueUpsert(BaseItem? item)
