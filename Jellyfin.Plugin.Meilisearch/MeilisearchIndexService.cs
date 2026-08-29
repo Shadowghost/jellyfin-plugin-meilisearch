@@ -825,10 +825,6 @@ public class MeilisearchIndexService : IHostedService, IDisposable
                         await Task.Delay(GetFlushRetryDelay(), cancellationToken).ConfigureAwait(false);
                     }
                 }
-
-                if (reader.Count == 0)
-                {
-                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
