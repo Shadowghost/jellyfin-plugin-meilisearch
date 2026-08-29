@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/refs/heads/unstable/images/jellyfin-plugin-meilisearch.png",
     "versions": [
       {
+        "version": "2026.8.29.607",
+        "changelog": "Initial release with search provider, real-time sync, and reindex task. Optional semantic search using a locally run Qwen3-Embedding-0.6B model, disabled by default.\n",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.08.29.0607-20aeb48/meilisearch_2026.8.29.607.zip",
+        "checksum": "18520d70023a3b706c64901b6d882e10",
+        "timestamp": "2026-08-29T06:07:29Z"
+      },
+      {
         "version": "2026.8.8.923",
         "changelog": "Initial release with search provider, real-time sync, and reindex task.\n",
         "targetAbi": "12.0.0.0",
