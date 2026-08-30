@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
@@ -62,6 +64,54 @@ internal static class OnnxRuntimeNativeLoader
             }
 #pragma warning restore CA1031
         }
+    }
+
+    /// <summary>
+    /// Determines whether ONNX Runtime's native library can actually be loaded on this host.
+    /// </summary>
+    /// <param name="logger">The logger.</param>
+    /// <param name="reason">When unavailable, a short explanation suitable for an admin.</param>
+    /// <returns><c>true</c> when a native library was found and loaded.</returns>
+    public static bool IsNativeLibraryAvailable(ILogger logger, out string? reason)
+    {
+        if (GetNativeFileName() is null)
+        {
+            reason = "ONNX Runtime publishes no native library for this operating system";
+            return false;
+        }
+
+        var architecture = RuntimeInformation.ProcessArchitecture;
+        if (architecture is not (Architecture.X64 or Architecture.Arm64))
+        {
+            reason = string.Format(
+                CultureInfo.InvariantCulture,
+                "ONNX Runtime publishes no native library for the {0} architecture",
+                architecture);
+            return false;
+        }
+
+        foreach (var candidate in GetCandidatePaths())
+        {
+            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out _))
+            {
+                logger.LogDebug("ONNX Runtime native library available at {Path}", candidate);
+                reason = null;
+                return true;
+            }
+        }
+
+        if (NativeLibrary.TryLoad(LibraryName, typeof(InferenceSession).Assembly, null, out _))
+        {
+            logger.LogDebug("ONNX Runtime native library available from the system library path");
+            reason = null;
+            return true;
+        }
+
+        reason = string.Format(
+            CultureInfo.InvariantCulture,
+            "no ONNX Runtime native library for {0} was found in the plugin directory or on the system library path",
+            string.Join(" or ", GetRuntimeIdentifiers().Distinct(StringComparer.Ordinal)));
+        return false;
     }
 
     private static IntPtr Resolve(string libraryName, ILogger logger)

@@ -52,7 +52,7 @@ public class PluginConfiguration : BasePluginConfiguration
         EmbeddingBatchSize = 8;
         EmbeddingThreads = 0;
         EnableEmbeddingCache = true;
-        EmbeddingCacheMaxEntries = 250000;
+        EmbeddingCacheMaxEntries = 0;
         BinaryQuantizeVectors = true;
     }
 
@@ -212,9 +212,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets a value indicating whether computed vectors are kept on disk and reused.
     /// </summary>
     /// <remarks>
-    /// On by default. A rebuild re-embeds the whole library, and for the overwhelming majority of
-    /// items the metadata has not changed since the last run, so the vector is identical - this turns
-    /// hours of inference back into a file read. The cost is roughly four kilobytes per item on disk.
+    /// On by default. A rebuild re-embeds the whole library, and unchanged metadata yields an
+    /// identical vector, so this turns hours of inference back into a file read. Costs about four
+    /// kilobytes per item on disk.
     /// </remarks>
     public bool EnableEmbeddingCache { get; set; }
 
@@ -223,29 +223,23 @@ public class PluginConfiguration : BasePluginConfiguration
     /// bit per dimension instead of a 32-bit float.
     /// </summary>
     /// <remarks>
-    /// On by default: it shrinks the stored vectors 32-fold - for a 300k-item library, from well over
-    /// a gigabyte to a few tens of megabytes - which is what keeps them resident instead of being
-    /// paged in per query. On a library measured cold, that paging was the difference between a
-    /// search taking three seconds and taking a few hundred milliseconds.
+    /// On by default: 32 times smaller - a gigabyte down to tens of megabytes for a 300k-item library
+    /// - which keeps the vectors resident instead of paged in per query, worth seconds on a cold
+    /// search. The cost is some ranking precision in the vector half of a hybrid search, and the
+    /// entries it swaps in are near-ties: measured on real library vectors, within about 1.5% of the
+    /// similarity of what they replace.
     /// <para>
-    /// The cost is ranking precision, and it is smaller than it sounds. Measured against the
-    /// unquantized ranking on real library vectors, the quantized top ten agrees on roughly two
-    /// thirds of its entries, but the ones it substitutes are near-ties drawn from just below the
-    /// cut: their mean similarity is within about 1.5% of the entries they replace. It also only
-    /// affects the vector half of a hybrid search - keyword matching is exact either way.
-    /// </para>
-    /// <para>
-    /// Turning this off again does not restore precision on its own. Meilisearch discards the full
-    /// vectors as it quantizes, so the index has to be rebuilt to get them back. That rebuild reads
-    /// from the embedding cache, which always holds full-precision vectors, so it costs a re-upload
-    /// rather than re-running the model over the library.
+    /// Turning it off needs a rebuild - Meilisearch discards the full vectors as it quantizes - but
+    /// that rebuild reads from the embedding cache, which always keeps full precision, so it
+    /// re-uploads rather than re-running the model.
     /// </para>
     /// </remarks>
     public bool BinaryQuantizeVectors { get; set; }
 
     /// <summary>
-    /// Gets or sets the maximum number of vectors the cache stores, or zero for no limit. A full
-    /// rebuild prunes entries it did not use, so this only bites on libraries larger than the limit.
+    /// Gets or sets the maximum number of vectors the cache stores, or zero for no limit, which is
+    /// the default. A full rebuild already prunes entries it did not use, so the cache tracks the
+    /// library's size on its own and a limit only matters when disk space has to be capped.
     /// </summary>
     public int EmbeddingCacheMaxEntries { get; set; }
 }

@@ -128,36 +128,30 @@
                         <span>Compress stored vectors (binary quantization)</span>
                     </label>
                     <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
-                        Stores each vector in Meilisearch at one bit per dimension instead of a 32-bit float,
-                        shrinking them about 32&nbsp;times - for a 300k-item library, from over a gigabyte to a
-                        few tens of megabytes. That is usually the difference between the vectors staying in memory
-                        and being read from disk on every search, which can cost seconds on a cold index.
+                        Stores vectors at one bit per dimension instead of a 32-bit float: about 32&nbsp;times smaller,
+                        which keeps them in memory instead of read from disk on every search - seconds on a cold index.
+                        The trade is some ranking precision in the vector half of a search, and what it swaps in are
+                        near-ties, within roughly 1.5% of the similarity of what they replace. Keyword matching is
+                        exact either way.
                         <br /><br />
-                        The trade is some ranking precision in the vector half of a search; keyword matching is exact
-                        either way. Measured on real library vectors, the compressed top ten keeps about two thirds of
-                        the same entries, and the ones it swaps in are near-ties from just below the cut - within
-                        roughly 1.5% of the similarity of what they replace.
-                        <br /><br />
-                        Turning this back off does not restore precision by itself: Meilisearch discards the full
-                        vectors as it compresses them, so the index has to be rebuilt. That rebuild reads from the
-                        vector cache below, which always keeps full precision, so it re-uploads rather than
-                        re-running the model.
+                        Turning it back off needs a rebuild, since Meilisearch discards the full vectors as it
+                        compresses them - but that rebuild reads from the vector cache below, which always keeps full
+                        precision, so it re-uploads rather than re-running the model.
                     </div>
                     <label class="checkboxContainer">
                         <input is="emby-checkbox" type="checkbox" id="enableEmbeddingCache" />
                         <span>Cache computed vectors on disk</span>
                     </label>
                     <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
-                        A rebuild re-embeds the whole library, and for items whose metadata has not changed the vector
-                        is identical - the cache turns that back into a file read instead of hours of CPU. Costs
-                        about 4&nbsp;KB per item on disk, kept under Jellyfin's data directory and reloaded on every
-                        restart. Leave this on unless disk space is tight.
+                        A rebuild re-embeds the whole library, and unchanged metadata gives an identical vector - the
+                        cache turns that back into a file read instead of hours of CPU. Costs about 4&nbsp;KB per item,
+                        kept under Jellyfin's data directory. Leave this on unless disk space is tight.
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingCacheMaxEntries" min="0" step="1000" label="Cache Size Limit (items, 0 = unlimited)" />
                         <div class="fieldDescription">
-                            A rebuild drops cached vectors it no longer needs, so this only bites on libraries larger
-                            than the limit. Default: 250000
+                            A rebuild already drops cached vectors it no longer needs, so the cache follows your
+                            library's size on its own. Set a limit only to cap disk use. Default: 0 (unlimited)
                         </div>
                     </div>
                     <div class="inputContainer">
@@ -500,7 +494,7 @@
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
                         document.querySelector('#binaryQuantizeVectors').checked = config.BinaryQuantizeVectors !== false;
                         document.querySelector('#enableEmbeddingCache').checked = config.EnableEmbeddingCache !== false;
-                        setNumericInput('#embeddingCacheMaxEntries', config.EmbeddingCacheMaxEntries, 250000);
+                        setNumericInput('#embeddingCacheMaxEntries', config.EmbeddingCacheMaxEntries, 0);
                         document.querySelector('#embeddingModelPath').value = config.EmbeddingModelPath || '';
 
                         Dashboard.hideLoadingMsg();
@@ -542,7 +536,7 @@
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
                         config.BinaryQuantizeVectors = document.querySelector('#binaryQuantizeVectors').checked;
                         config.EnableEmbeddingCache = document.querySelector('#enableEmbeddingCache').checked;
-                        config.EmbeddingCacheMaxEntries = parseIntOrDefault(document.querySelector('#embeddingCacheMaxEntries').value, 250000);
+                        config.EmbeddingCacheMaxEntries = parseIntOrDefault(document.querySelector('#embeddingCacheMaxEntries').value, 0);
                         config.EmbeddingModelPath = document.querySelector('#embeddingModelPath').value;
 
                         ApiClient.updatePluginConfiguration(MeilisearchPluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
