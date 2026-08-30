@@ -1140,7 +1140,9 @@ public class MeilisearchClientWrapper : IDisposable
             config.SearchOverviews ? "ov" : "noov",
             config.SearchFilePaths ? "path" : "nopath",
             "|",
-            config.EnableSemanticSearch ? "vec" : "novec");
+            config.EnableSemanticSearch ? "vec" : "novec",
+            "|",
+            config.BinaryQuantizeVectors ? "bq" : "f32");
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -1404,15 +1406,17 @@ public class MeilisearchClientWrapper : IDisposable
                         [EmbeddingService.EmbedderName] = new Embedder
                         {
                             Source = EmbedderSource.UserProvided,
-                            Dimensions = EmbeddingService.Dimensions
+                            Dimensions = EmbeddingService.Dimensions,
+                            BinaryQuantized = Configuration.BinaryQuantizeVectors
                         }
                     },
                     cancellationToken).ConfigureAwait(false);
 
                 _logger.LogInformation(
-                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions)",
+                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
                     EmbeddingService.EmbedderName,
-                    EmbeddingService.Dimensions);
+                    EmbeddingService.Dimensions,
+                    Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
                 return;
             }
 

@@ -35,7 +35,7 @@ This plugin requires Jellyfin with external search provider support, which adds 
 - Jellyfin unstable/nightly builds, and
 - the upcoming Jellyfin 12.0.0 stable release.
 
-No custom Jellyfin build is required — the plugin compiles against the official `Jellyfin.Controller` NuGet packages (see [Building](#building)).
+No custom Jellyfin build is required - the plugin compiles against the official `Jellyfin.Controller` NuGet packages (see [Building](#building)).
 
 ### Meilisearch Server
 
@@ -183,7 +183,7 @@ knowing:
   the server log if results look like they're coming from the wrong engine.
 - Jellyfin core applies user, library-visibility and parental-rating filtering *after* the
   provider returns. The plugin deliberately does not index permissions, so a document in the
-  index is never by itself a leak — but it does mean the number of hits a user sees can be
+  index is never by itself a leak - but it does mean the number of hits a user sees can be
   lower than the number the plugin returned.
 
 ### Query handling
@@ -254,7 +254,7 @@ your server.
 
 ### What it costs
 
-Be deliberate about turning this on — it is a real trade, which is why it ships disabled:
+Be deliberate about turning this on - it is a real trade, which is why it ships disabled:
 
 - **~610 MB download**, once, into the model directory.
 - **~1-2 GB of RAM** while the model is loaded.
@@ -277,7 +277,7 @@ the vector comparison.
    already in the index have none until you rebuild.
 
 Search keeps working normally throughout. Until the model is loaded, and for any document without
-a vector, queries fall back to pure keyword matching — enabling semantic search never makes search
+a vector, queries fall back to pure keyword matching - enabling semantic search never makes search
 unavailable, only gradually better as vectors land.
 
 Turning the setting off releases the model and removes the embedder from Meilisearch, which drops
@@ -286,19 +286,19 @@ the stored vectors and reclaims the index space.
 ### Tuning
 
 **Semantic Ratio** is the dial that matters. At 0 vectors are ignored; at 100 keyword matching is
-ignored, and exact title searches get noticeably worse — a vector search for `Alien` happily returns
+ignored, and exact title searches get noticeably worse - a vector search for `Alien` happily returns
 every science-fiction film. The default of 50 keeps exact titles winning while letting descriptive
 queries work. If precise titles start losing to thematically similar items, lower it.
 
 **Cache computed vectors on disk** is on by default and worth leaving on. It is persistent: it lives
 in `meilisearch-embedding-cache` under Jellyfin's data directory (not the cache directory, which
-routine cleanups empty) and is reopened on every start, so restarting Jellyfin — or having it killed
-outright — costs nothing. Vectors reach the operating system as they are computed, and are forced out
+routine cleanups empty) and is reopened on every start, so restarting Jellyfin - or having it killed
+outright - costs nothing. Vectors reach the operating system as they are computed, and are forced out
 to disk every thousand entries, at the end of a rebuild and on shutdown, so even a host that loses
 power gives up at most a few seconds of re-embedding. A half-written tail from such a crash is
 detected and discarded on the next open rather than being read back as a corrupt vector. A rebuild re-embeds the
 whole library, but for items whose metadata has not changed since the last run the text handed to
-the model is byte-identical, so the vector is too — the cache turns that forward pass back into a
+the model is byte-identical, so the vector is too - the cache turns that forward pass back into a
 file read, which is the difference between a rebuild taking hours and taking minutes. Edited items
 miss the cache and are re-embedded, exactly as they should be. A clean full rebuild also prunes
 cached vectors it no longer needed, so the cache tracks the library rather than growing forever;
@@ -408,7 +408,7 @@ that logs this warning.** Everything else keeps working in the meantime.
 | Symptom | Likely cause and fix |
 |---------|----------------------|
 | No results, or results identical to stock Jellyfin | The index is empty and search fell back to the SQL provider. Run **Rebuild Meilisearch Index** and check the document count in the **Status** panel. |
-| Parent-scoped or media-type-scoped searches miss items | Stale document schema — see [Upgrading](#upgrading). |
+| Parent-scoped or media-type-scoped searches miss items | Stale document schema - see [Upgrading](#upgrading). |
 | Results stop updating after adding media | Real-time sync is disabled, or the health monitor paused it because Meilisearch is unreachable. The log records both. Sync resumes automatically once the server returns. |
 | Test Connection reports reachable but not authenticated | The **API Key** is wrong or lacks permission. A master key or a key with search + documents + settings + tasks + indexes access is required - a rebuild creates, swaps and deletes indexes. |
 | Meilisearch was restarted / its container was recreated | Handled automatically: on a communication failure the plugin rebuilds its HTTP client (clearing the pooled connection and cached DNS entry) and retries once. No Jellyfin restart needed. |
