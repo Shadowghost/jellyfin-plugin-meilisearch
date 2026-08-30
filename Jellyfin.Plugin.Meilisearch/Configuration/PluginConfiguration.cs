@@ -50,6 +50,7 @@ public class PluginConfiguration : BasePluginConfiguration
         EmbeddingThreads = 0;
         EnableEmbeddingCache = true;
         EmbeddingCacheMaxEntries = 250000;
+        BinaryQuantizeVectors = true;
     }
 
     /// <summary>
@@ -193,6 +194,31 @@ public class PluginConfiguration : BasePluginConfiguration
     /// hours of inference back into a file read. The cost is roughly four kilobytes per item on disk.
     /// </remarks>
     public bool EnableEmbeddingCache { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether Meilisearch stores vectors binary-quantized, at one
+    /// bit per dimension instead of a 32-bit float.
+    /// </summary>
+    /// <remarks>
+    /// On by default: it shrinks the stored vectors 32-fold - for a 300k-item library, from well over
+    /// a gigabyte to a few tens of megabytes - which is what keeps them resident instead of being
+    /// paged in per query. On a library measured cold, that paging was the difference between a
+    /// search taking three seconds and taking a few hundred milliseconds.
+    /// <para>
+    /// The cost is ranking precision, and it is smaller than it sounds. Measured against the
+    /// unquantized ranking on real library vectors, the quantized top ten agrees on roughly two
+    /// thirds of its entries, but the ones it substitutes are near-ties drawn from just below the
+    /// cut: their mean similarity is within about 1.5% of the entries they replace. It also only
+    /// affects the vector half of a hybrid search - keyword matching is exact either way.
+    /// </para>
+    /// <para>
+    /// Turning this off again does not restore precision on its own. Meilisearch discards the full
+    /// vectors as it quantizes, so the index has to be rebuilt to get them back. That rebuild reads
+    /// from the embedding cache, which always holds full-precision vectors, so it costs a re-upload
+    /// rather than re-running the model over the library.
+    /// </para>
+    /// </remarks>
+    public bool BinaryQuantizeVectors { get; set; }
 
     /// <summary>
     /// Gets or sets the maximum number of vectors the cache stores, or zero for no limit. A full

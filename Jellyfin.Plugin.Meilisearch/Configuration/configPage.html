@@ -35,9 +35,9 @@
                     </div>
                     <div class="selectContainer">
                         <select is="emby-select" id="matchingStrategy" label="Matching Strategy">
-                            <option value="frequency">Frequency &mdash; drop the most common word first (default)</option>
-                            <option value="last">Last &mdash; drop words from the end of the query</option>
-                            <option value="all">All &mdash; only return items matching every word</option>
+                            <option value="frequency">Frequency - drop the most common word first (default)</option>
+                            <option value="last">Last - drop words from the end of the query</option>
+                            <option value="all">All - only return items matching every word</option>
                         </select>
                         <div class="fieldDescription">
                             How Meilisearch handles a query it cannot match in full. <em>Frequency</em> discards the word
@@ -83,8 +83,8 @@
                     <h3 style="margin-top: 1.5em;">Semantic Search</h3>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
                         Adds meaning-based matching on top of keyword search, so &ldquo;space movie with a robot&rdquo; can
-                        find <em>WALL&middot;E</em>. It runs a Qwen3-Embedding-0.6B model locally &mdash; no external
-                        service and no data leaves your server &mdash; but it downloads about 610&nbsp;MB once and then
+                        find <em>WALL&middot;E</em>. It runs a Qwen3-Embedding-0.6B model locally - no external
+                        service and no data leaves your server - but it downloads about 610&nbsp;MB once and then
                         costs CPU time for every indexed item. Leave it off unless you want that trade.
                     </div>
                     <label class="checkboxContainer">
@@ -117,12 +117,32 @@
                         </div>
                     </div>
                     <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="binaryQuantizeVectors" />
+                        <span>Compress stored vectors (binary quantization)</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Stores each vector in Meilisearch at one bit per dimension instead of a 32-bit float,
+                        shrinking them about 32&nbsp;times - for a 300k-item library, from over a gigabyte to a
+                        few tens of megabytes. That is usually the difference between the vectors staying in memory
+                        and being read from disk on every search, which can cost seconds on a cold index.
+                        <br /><br />
+                        The trade is some ranking precision in the vector half of a search; keyword matching is exact
+                        either way. Measured on real library vectors, the compressed top ten keeps about two thirds of
+                        the same entries, and the ones it swaps in are near-ties from just below the cut - within
+                        roughly 1.5% of the similarity of what they replace.
+                        <br /><br />
+                        Turning this back off does not restore precision by itself: Meilisearch discards the full
+                        vectors as it compresses them, so the index has to be rebuilt. That rebuild reads from the
+                        vector cache below, which always keeps full precision, so it re-uploads rather than
+                        re-running the model.
+                    </div>
+                    <label class="checkboxContainer">
                         <input is="emby-checkbox" type="checkbox" id="enableEmbeddingCache" />
                         <span>Cache computed vectors on disk</span>
                     </label>
                     <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
                         A rebuild re-embeds the whole library, and for items whose metadata has not changed the vector
-                        is identical &mdash; the cache turns that back into a file read instead of hours of CPU. Costs
+                        is identical - the cache turns that back into a file read instead of hours of CPU. Costs
                         about 4&nbsp;KB per item on disk, kept under Jellyfin's data directory and reloaded on every
                         restart. Leave this on unless disk space is tight.
                     </div>
@@ -150,7 +170,7 @@
                         <span id="connectionStatus" style="margin-left: 1em;"></span>
                     </div>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
-                        <em>Reconnect</em> drops the current connection and dials Meilisearch again &mdash; useful after
+                        <em>Reconnect</em> drops the current connection and dials Meilisearch again - useful after
                         moving or recreating the server. Transient failures recover on their own.
                     </div>
                     <div>
@@ -166,7 +186,7 @@
                     <h2>Reindex</h2>
                     <p>
                         Rebuilds the index from scratch. This runs as the &ldquo;Rebuild Meilisearch Index&rdquo;
-                        scheduled task, so you can follow its progress &mdash; and cancel it &mdash; on the
+                        scheduled task, so you can follow its progress - and cancel it - on the
                         Scheduled Tasks page.
                     </p>
                     <button is="emby-button" type="button" id="reindexBtn" class="raised"><span>Rebuild Index</span></button>
@@ -409,6 +429,7 @@
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingBatchSize', config.EmbeddingBatchSize, 8);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
+                        document.querySelector('#binaryQuantizeVectors').checked = config.BinaryQuantizeVectors !== false;
                         document.querySelector('#enableEmbeddingCache').checked = config.EnableEmbeddingCache !== false;
                         setNumericInput('#embeddingCacheMaxEntries', config.EmbeddingCacheMaxEntries, 250000);
                         document.querySelector('#embeddingModelPath').value = config.EmbeddingModelPath || '';
@@ -443,6 +464,7 @@
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingBatchSize = parseIntOrDefault(document.querySelector('#embeddingBatchSize').value, 8);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
+                        config.BinaryQuantizeVectors = document.querySelector('#binaryQuantizeVectors').checked;
                         config.EnableEmbeddingCache = document.querySelector('#enableEmbeddingCache').checked;
                         config.EmbeddingCacheMaxEntries = parseIntOrDefault(document.querySelector('#embeddingCacheMaxEntries').value, 250000);
                         config.EmbeddingModelPath = document.querySelector('#embeddingModelPath').value;

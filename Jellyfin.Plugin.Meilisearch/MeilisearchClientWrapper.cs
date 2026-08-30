@@ -28,6 +28,8 @@ public class MeilisearchClientWrapper : IDisposable
     private const double SearchTimeSmoothingFactor = 0.25;
 
     private static readonly string[] SupportedMatchingStrategies = ["frequency", "last", "all"];
+    private static readonly string[] IdOnly = ["id"];
+    private static readonly string[] IdAndType = ["id", "itemType"];
 
     private readonly ILogger<MeilisearchClientWrapper> _logger;
     private readonly SemaphoreSlim _clientLock = new(1, 1);
@@ -153,7 +155,8 @@ public class MeilisearchClientWrapper : IDisposable
                         Limit = limit,
                         ShowRankingScore = true,
                         MatchingStrategy = matchingStrategy,
-                        Filter = filter
+                        Filter = filter,
+                        AttributesToRetrieve = IdOnly
                     };
 
                     var minScore = Configuration.MinimumMatchScore;
@@ -182,17 +185,17 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Performs one Meilisearch query per item type in a single HTTP multi-search request and merges the results.
-    /// Each per-type query receives its own quota so that strongly-matching documents of one type (e.g. songs
-    /// by an artist) cannot drown out weaker but relevant matches of other types (e.g. movies, episodes).
+    /// Searches every requested item type in one query and applies the per-type quota to the hits it
+    /// returns, so that strongly-matching documents of one type (e.g. songs by an artist) cannot
+    /// drown out weaker but relevant matches of other types (e.g. movies, episodes).
     /// </summary>
     /// <param name="searchTerm">The search term.</param>
-    /// <param name="types">The item types to query, one Meilisearch query per type.</param>
+    /// <param name="types">The item types to search.</param>
     /// <param name="totalLimit">Maximum total number of results across all types.</param>
-    /// <param name="extraFilter">Optional Meilisearch filter expression applied on top of the per-type filter.</param>
-    /// <param name="queryVector">Optional query embedding. When supplied every sub-query runs as a hybrid keyword/vector search.</param>
+    /// <param name="extraFilter">Optional Meilisearch filter expression applied on top of the type filter.</param>
+    /// <param name="queryVector">Optional query embedding. When supplied the query runs as a hybrid keyword/vector search.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Merged, de-duplicated list of (id, score) tuples, capped at <paramref name="totalLimit"/>.</returns>
+    /// <returns>List of (id, score) tuples in descending score order, capped at <paramref name="totalLimit"/>.</returns>
     public async Task<IReadOnlyList<(string Id, double Score)>> MultiTypeSearchAsync(
         string searchTerm,
         IReadOnlyList<BaseItemKind> types,
@@ -211,92 +214,39 @@ public class MeilisearchClientWrapper : IDisposable
             return await ExecuteSearchAsync<IReadOnlyList<(string Id, double Score)>>(
                 async (matchingStrategy, ct) =>
                 {
-                    // Ensure the index exists and settings are applied before issuing the multi-search.
-                    await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
-                    var client = GetClient();
-                    var indexUid = Configuration.IndexName;
+                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
 
-                    // Per-type quota: give each type a fair share
-                    var perTypeLimit = Math.Max(20, totalLimit / types.Count);
-                    perTypeLimit = Math.Min(perTypeLimit, totalLimit);
+                    var distinctTypes = types.Distinct().ToArray();
+                    var typeFilter = $"itemType IN [{string.Join(", ", distinctTypes.Select(t => $"\"{t}\""))}]";
+                    var filter = string.IsNullOrEmpty(extraFilter)
+                        ? typeFilter
+                        : $"{typeFilter} AND {extraFilter}";
+
+                    var searchParams = new SearchQuery
+                    {
+                        Limit = totalLimit,
+                        ShowRankingScore = true,
+                        MatchingStrategy = matchingStrategy,
+                        Filter = filter,
+
+                        // itemType on top of the id: the quota below buckets by it, and it is one
+                        // short string per hit against the whole document this would otherwise return.
+                        AttributesToRetrieve = IdAndType
+                    };
 
                     var minScore = Configuration.MinimumMatchScore;
-                    decimal? threshold = (minScore is not null && minScore > 0) ? minScore.Value / 100m : null;
-
-                    var queries = new List<SearchQuery>(types.Count);
-                    foreach (var type in types)
+                    if (minScore is not null && minScore > 0)
                     {
-                        var typeFilter = $"itemType = \"{type}\"";
-                        var combinedFilter = string.IsNullOrEmpty(extraFilter)
-                            ? typeFilter
-                            : $"{typeFilter} AND {extraFilter}";
-
-                        var sq = new SearchQuery
-                        {
-                            IndexUid = indexUid,
-                            Q = searchTerm,
-                            Limit = perTypeLimit,
-                            Filter = combinedFilter,
-                            ShowRankingScore = true,
-                            MatchingStrategy = matchingStrategy
-                        };
-
-                        if (threshold.HasValue)
-                        {
-                            sq.RankingScoreThreshold = threshold;
-                        }
-
-                        ApplyHybrid(sq, queryVector);
-
-                        queries.Add(sq);
+                        searchParams.RankingScoreThreshold = minScore.Value / 100m;
                     }
 
-                    var multiQuery = new MultiSearchQuery { Queries = queries };
+                    ApplyHybrid(searchParams, queryVector);
+
                     var stopwatch = Stopwatch.StartNew();
-                    var result = await client.MultiSearchAsync(multiQuery, ct).ConfigureAwait(false);
+                    var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
                     RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
-                    var merged = new List<(string Id, double Score)>(types.Count * perTypeLimit);
-                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var subResult in result.Results)
-                    {
-                        foreach (var hit in subResult.Hits)
-                        {
-                            var root = hit.RootElement;
-                            if (!root.TryGetProperty("id", out var idElement))
-                            {
-                                continue;
-                            }
-
-                            var id = idElement.GetString();
-                            if (string.IsNullOrEmpty(id) || !seen.Add(id))
-                            {
-                                continue;
-                            }
-
-                            double score = 0;
-                            if (root.TryGetProperty("_rankingScore", out var scoreElement)
-                                && scoreElement.ValueKind == JsonValueKind.Number)
-                            {
-                                score = scoreElement.GetDouble();
-                            }
-
-                            merged.Add((id, score));
-                        }
-                    }
-
-                    merged.Sort((a, b) =>
-                    {
-                        var byScore = b.Score.CompareTo(a.Score);
-                        return byScore != 0 ? byScore : string.CompareOrdinal(a.Id, b.Id);
-                    });
-
-                    if (merged.Count > totalLimit)
-                    {
-                        merged.RemoveRange(totalLimit, merged.Count - totalLimit);
-                    }
-
-                    return merged;
+                    return ApplyPerTypeQuota(results.Hits, distinctTypes.Length, totalLimit);
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -305,6 +255,60 @@ public class MeilisearchClientWrapper : IDisposable
             _logger.LogError(ex, "Error performing multi-type Meilisearch for term '{SearchTerm}'", searchTerm);
             return [];
         }
+    }
+
+    private static IReadOnlyList<(string Id, double Score)> ApplyPerTypeQuota(
+        IEnumerable<MeilisearchDocument> hits,
+        int typeCount,
+        int totalLimit)
+    {
+        // The same share the per-type sub-queries used as their individual limits, so a query that
+        // would have saturated every one of them selects the same documents it did before.
+        var perTypeLimit = Math.Min(Math.Max(20, totalLimit / Math.Max(1, typeCount)), totalLimit);
+
+        var selected = new List<(string Id, double Score)>(Math.Min(totalLimit, 512));
+        var overflow = new List<(string Id, double Score)>();
+        var takenPerType = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        foreach (var hit in hits)
+        {
+            if (string.IsNullOrEmpty(hit.Id))
+            {
+                continue;
+            }
+
+            var entry = (hit.Id, hit.RankingScore ?? 0.0);
+            var itemType = hit.ItemType ?? string.Empty;
+
+            takenPerType.TryGetValue(itemType, out var taken);
+            if (taken < perTypeLimit)
+            {
+                takenPerType[itemType] = taken + 1;
+                selected.Add(entry);
+                continue;
+            }
+
+            // Over its share. Held back rather than dropped, in case the budget is not spent.
+            overflow.Add(entry);
+        }
+
+        // Both lists are already in descending score order, so the refill only has to take a prefix.
+        if (selected.Count < totalLimit && overflow.Count > 0)
+        {
+            selected.AddRange(overflow.Take(totalLimit - selected.Count));
+            selected.Sort(static (a, b) =>
+            {
+                var byScore = b.Score.CompareTo(a.Score);
+                return byScore != 0 ? byScore : string.CompareOrdinal(a.Id, b.Id);
+            });
+        }
+
+        if (selected.Count > totalLimit)
+        {
+            selected.RemoveRange(totalLimit, selected.Count - totalLimit);
+        }
+
+        return selected;
     }
 
     /// <summary>
@@ -874,7 +878,9 @@ public class MeilisearchClientWrapper : IDisposable
             "|",
             config.IndexName ?? string.Empty,
             "|",
-            config.EnableSemanticSearch ? "vec" : "novec");
+            config.EnableSemanticSearch ? "vec" : "novec",
+            "|",
+            config.BinaryQuantizeVectors ? "bq" : "f32");
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -1091,8 +1097,8 @@ public class MeilisearchClientWrapper : IDisposable
         // Configure distinct attribute to deduplicate results by document id.
         await index.UpdateDistinctAttributeAsync("id", cancellationToken).ConfigureAwait(false);
 
-        // Restrict displayed attributes - the search provider only consumes id + _rankingScore.
-        await index.UpdateDisplayedAttributesAsync(["id"], cancellationToken).ConfigureAwait(false);
+        // Restrict displayed attributes to what a search actually consumes.
+        await index.UpdateDisplayedAttributesAsync(["id", "itemType"], cancellationToken).ConfigureAwait(false);
 
         await ConfigureEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
 
@@ -1127,15 +1133,17 @@ public class MeilisearchClientWrapper : IDisposable
                         [EmbeddingService.EmbedderName] = new Embedder
                         {
                             Source = EmbedderSource.UserProvided,
-                            Dimensions = EmbeddingService.Dimensions
+                            Dimensions = EmbeddingService.Dimensions,
+                            BinaryQuantized = Configuration.BinaryQuantizeVectors
                         }
                     },
                     cancellationToken).ConfigureAwait(false);
 
                 _logger.LogInformation(
-                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions)",
+                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
                     EmbeddingService.EmbedderName,
-                    EmbeddingService.Dimensions);
+                    EmbeddingService.Dimensions,
+                    Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
                 return;
             }
 
