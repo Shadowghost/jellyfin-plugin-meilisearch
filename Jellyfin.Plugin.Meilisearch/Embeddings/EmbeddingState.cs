@@ -11,6 +11,12 @@ public enum EmbeddingState
     Disabled,
 
     /// <summary>
+    /// Enabled, but this host cannot run a local model: ONNX Runtime has no native library for it.
+    /// Nothing is downloaded and keyword search continues unaffected.
+    /// </summary>
+    Unsupported,
+
+    /// <summary>
     /// Enabled, but the model files are not on disk yet.
     /// </summary>
     NotDownloaded,
@@ -24,6 +30,12 @@ public enum EmbeddingState
     /// The model is loaded and vectors can be produced.
     /// </summary>
     Ready,
+
+    /// <summary>
+    /// Enabled and downloaded, but released from memory on request. Searches run keyword-only until
+    /// something loads it again - a reindex, or saving the plugin configuration.
+    /// </summary>
+    Unloaded,
 
     /// <summary>
     /// Initialization failed. Keyword search continues to work unaffected.

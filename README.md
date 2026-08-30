@@ -165,6 +165,7 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Max Tokens per Item | `256` | How much of each item's metadata is embedded |
 | Embedding Batch Size | `8` | Items per inference pass |
 | Inference Threads | `0` | 0 uses half the available CPU cores |
+| Cache Size Limit | `0` | Cap on cached vectors; `0` is unlimited |
 | Model Directory | (empty) | Empty means `<jellyfin-data>/meilisearch-embeddings`; each model gets a subdirectory |
 
 Use the **Test Connection** button to verify connectivity and that your API key is valid. The **Status** panel shows the live document count, index size, last incremental sync time, and field distribution.
@@ -310,9 +311,10 @@ re-embeds the whole library, but for items whose metadata has not changed since 
 text handed to the model is byte-identical, so the vector is too - the cache turns that forward pass back into a
 file read, which is the difference between a rebuild taking hours and taking minutes. Edited items
 miss the cache and are re-embedded, exactly as they should be. A clean full rebuild also prunes
-cached vectors it no longer needed, so the cache tracks the library rather than growing forever;
-**Cache Size Limit** is a backstop for libraries larger than the limit. The **Status** panel reports
-how many vectors are cached and how many lookups this session were served from it.
+cached vectors it no longer needed, so the cache tracks the library rather than growing forever -
+which is why **Cache Size Limit** defaults to `0`, unlimited. Set one only to cap disk use. The
+**Status** panel reports how many vectors are cached and how many lookups this session were served
+from it.
 
 **Max Tokens per Item** trades indexing time for context. The embedded text is ordered
 title → series/album → artists → type → year → genres → studios → tags → people → tagline →
