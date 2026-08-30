@@ -33,8 +33,12 @@ jobs:
 
       - name: Extract version from release tag
         id: version
+        env:
+          # Via the environment so a tag containing shell metacharacters is never
+          # parsed as script.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${GITHUB_REF_NAME:-${{ github.event.release.tag_name }}}"
+          TAG="${GITHUB_REF_NAME:-$RELEASE_TAG}"
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
