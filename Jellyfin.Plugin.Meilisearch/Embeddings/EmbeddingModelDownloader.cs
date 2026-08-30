@@ -74,9 +74,9 @@ public sealed class EmbeddingModelDownloader
         }
 
         _logger.LogInformation(
-            "Downloading embedding model {Repository} ({Variant}) to {Directory}; {TotalMegabytes} MB to fetch",
-            EmbeddingModelDescriptor.Repository,
-            EmbeddingModelDescriptor.Variant,
+            "Downloading embedding model {Repository} ({ModelFile}) to {Directory}; {TotalMegabytes} MB to fetch",
+            descriptor.Definition.Repository,
+            descriptor.Definition.ModelFile,
             descriptor.Directory,
             (totalBytes / (1024 * 1024)).ToString(CultureInfo.InvariantCulture));
 

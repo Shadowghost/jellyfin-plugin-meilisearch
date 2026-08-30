@@ -123,6 +123,7 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         _libraryManager.ItemRemoved += OnItemRemoved;
 
         WarnOnStaleIndexSchema();
+        WarnOnStaleEmbeddingModel();
 
         _workerCts = new CancellationTokenSource();
         var workerToken = _workerCts.Token;
@@ -172,6 +173,34 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             + "under-report until you run the 'Rebuild Meilisearch Index' task",
             indexedVersion,
             MeilisearchDocument.SchemaVersion);
+    }
+
+    private void WarnOnStaleEmbeddingModel()
+    {
+        if (!Configuration.EnableSemanticSearch)
+        {
+            return;
+        }
+
+        var selected = EmbeddingService.ActiveModel;
+        var indexed = Configuration.IndexedEmbeddingModelId;
+
+        if (string.IsNullOrEmpty(indexed))
+        {
+            return;
+        }
+
+        if (string.Equals(indexed, selected.Id, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "The Meilisearch index was built with the embedding model {IndexedModel} but {SelectedModel} is now selected. "
+            + "Vectors do not carry across models, so semantic search behaves as keyword-only until you run the "
+            + "'Rebuild Meilisearch Index' task",
+            indexed,
+            selected.Id);
     }
 
     /// <inheritdoc />

@@ -1,4 +1,5 @@
 using System;
+using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.Meilisearch.Configuration;
@@ -42,6 +43,8 @@ public class PluginConfiguration : BasePluginConfiguration
         LastIncrementalReindexUtc = null;
         IndexSchemaVersion = 0;
         EnableSemanticSearch = false;
+        EmbeddingModelId = EmbeddingModels.DefaultId;
+        IndexedEmbeddingModelId = string.Empty;
         AutoDownloadEmbeddingModel = true;
         EmbeddingModelPath = string.Empty;
         SemanticRatio = 50;
@@ -150,6 +153,25 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool EnableSemanticSearch { get; set; }
 
     /// <summary>
+    /// Gets or sets the identifier of the embedding model to use, as listed by
+    /// <see cref="EmbeddingModels"/>. Empty or unknown falls back to <see cref="EmbeddingModels.DefaultId"/>.
+    /// </summary>
+    /// <remarks>
+    /// Only models this build ships code for can be selected: the tokenizer, the graph inputs and the
+    /// pooling are part of a model, not settings around it. Each one gets its own directory on disk,
+    /// its own vector cache and its own Meilisearch embedder, so switching is reversible - but the
+    /// index has to be rebuilt afterwards, since vectors from one model mean nothing to another.
+    /// </remarks>
+    public string EmbeddingModelId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the <see cref="EmbeddingModelId"/> that was in effect at the last successful full
+    /// reindex, or empty when the index holds no vectors. Used to warn when the selected model no
+    /// longer matches what the index was built with.
+    /// </summary>
+    public string IndexedEmbeddingModelId { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the embedding model may be downloaded automatically
     /// once semantic search is enabled. When false, the model must be fetched with the
     /// "Download Meilisearch Embedding Model" scheduled task before semantic search becomes active.
@@ -157,8 +179,9 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool AutoDownloadEmbeddingModel { get; set; }
 
     /// <summary>
-    /// Gets or sets the directory the embedding model is stored in. Empty means a
-    /// <c>meilisearch-embeddings</c> directory under Jellyfin's data path.
+    /// Gets or sets the directory embedding models are stored in. Empty means a
+    /// <c>meilisearch-embeddings</c> directory under Jellyfin's data path. Each model gets a
+    /// subdirectory named after its identifier.
     /// </summary>
     public string EmbeddingModelPath { get; set; }
 

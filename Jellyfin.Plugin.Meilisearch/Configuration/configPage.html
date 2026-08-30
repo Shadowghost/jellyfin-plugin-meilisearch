@@ -83,14 +83,21 @@
                     <h3 style="margin-top: 1.5em;">Semantic Search</h3>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
                         Adds meaning-based matching on top of keyword search, so &ldquo;space movie with a robot&rdquo; can
-                        find <em>WALL&middot;E</em>. It runs a Qwen3-Embedding-0.6B model locally - no external
-                        service and no data leaves your server - but it downloads about 610&nbsp;MB once and then
-                        costs CPU time for every indexed item. Leave it off unless you want that trade.
+                        find <em>WALL&middot;E</em>. The model runs locally - no external service and no data leaves your
+                        server - but it downloads several hundred megabytes once and then costs CPU time for every
+                        indexed item. Leave it off unless you want that trade.
                     </div>
-                    <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="enableSemanticSearch" />
-                        <span>Enable semantic search</span>
-                    </label>
+                    <div class="selectContainer">
+                        <select is="emby-select" id="embeddingModel" label="Embedding Model">
+                            <option value="">Off - keyword search only</option>
+                        </select>
+                        <div class="fieldDescription">
+                            While this is off, nothing about embeddings is loaded or downloaded. Each model keeps its
+                            own download and its own vector cache, so switching away from one and back again costs
+                            neither - but the index has to be rebuilt after every switch, because vectors from one
+                            model mean nothing to another.
+                        </div>
+                    </div>
                     <label class="checkboxContainer">
                         <input is="emby-checkbox" type="checkbox" id="autoDownloadEmbeddingModel" />
                         <span>Download the model automatically</span>
@@ -156,12 +163,13 @@
                     <div class="inputContainer">
                         <input is="emby-input" type="text" id="embeddingModelPath" label="Model Directory (optional)" />
                         <div class="fieldDescription">
-                            Leave empty to store the model under Jellyfin's data directory.
+                            Leave empty to store models under Jellyfin's data directory. Each model gets its own
+                            subdirectory.
                         </div>
                     </div>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
-                        <strong>After enabling this, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong> Vectors are
-                        written as items are indexed, so existing documents have none until you rebuild.
+                        <strong>After enabling this or changing the model, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong>
+                        Vectors are written as items are indexed, so existing documents have none until you rebuild.
                     </div>
                     <br />
                     <div style="margin-bottom: 1em;">
@@ -263,6 +271,39 @@
                 }
             }
 
+            function fillEmbeddingModels(models, configuredId) {
+                var select = document.querySelector('#embeddingModel');
+                if (!select) {
+                    return;
+                }
+
+                // Everything below the first entry ("Off") is rebuilt from the server's list.
+                while (select.options.length > 1) {
+                    select.remove(1);
+                }
+
+                var known = false;
+                (models || []).forEach(function (model) {
+                    var id = pick(model, 'Id');
+                    var option = document.createElement('option');
+                    option.value = id;
+                    option.textContent = pick(model, 'DisplayName')
+                        + ' - ' + formatNumber(pick(model, 'ApproximateDownloadMegabytes')) + ' MB download, '
+                        + formatNumber(pick(model, 'Dimensions')) + ' dimensions';
+                    select.appendChild(option);
+                    known = known || id === configuredId;
+                });
+
+                // A model this build no longer offers stays selectable rather than silently turning
+                // into a different one the next time the page is saved.
+                if (configuredId && !known) {
+                    var unknown = document.createElement('option');
+                    unknown.value = configuredId;
+                    unknown.textContent = configuredId + ' (not available in this version)';
+                    select.appendChild(unknown);
+                }
+            }
+
             function renderStatus(stats) {
                 var lines = [];
 
@@ -324,6 +365,16 @@
                     lines.push('<div style="margin-top: 0.5em;"><strong>Semantic search:</strong> <span style="color:'
                         + (stateColors[embeddingState] || 'inherit') + ';">'
                         + escapeHtml(stateLabels[embeddingState] || embeddingState) + '</span></div>');
+
+                    var model = pick(stats, 'EmbeddingModel');
+                    if (model) {
+                        lines.push('<div><strong>Model:</strong> ' + escapeHtml(model) + '</div>');
+                    }
+
+                    if (pick(stats, 'EmbeddingModelRebuildRequired')) {
+                        lines.push('<div style="color:orange;">The index was built with a different embedding model. '
+                            + 'Run &ldquo;Rebuild Meilisearch Index&rdquo; to embed the library with the selected one.</div>');
+                    }
 
                     var modelDirectory = pick(stats, 'EmbeddingModelDirectory');
                     if (modelDirectory) {
@@ -390,7 +441,14 @@
             document.querySelector('.configPage')
                 .addEventListener('pageshow', function () {
                     Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId).then(function (config) {
+                    Promise.all([
+                        ApiClient.getPluginConfiguration(MeilisearchPluginConfig.pluginId),
+                        ApiClient.getJSON(ApiClient.getUrl('Plugins/Meilisearch/EmbeddingModels'))
+                            .catch(function () { return []; })
+                    ]).then(function (results) {
+                        var config = results[0];
+                        var models = results[1];
+
                         var urlInput = document.querySelector('#meilisearchUrl');
                         urlInput.value = config.MeilisearchUrl || 'http://localhost:7700';
                         urlInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
@@ -423,7 +481,18 @@
                         var synonymsInput = document.querySelector('#synonyms');
                         synonymsInput.value = config.Synonyms || '';
 
-                        document.querySelector('#enableSemanticSearch').checked = config.EnableSemanticSearch === true;
+                        var configuredModel = config.EmbeddingModelId || '';
+                        fillEmbeddingModels(models, configuredModel);
+                        var modelSelect = document.querySelector('#embeddingModel');
+                        modelSelect.value = config.EnableSemanticSearch === true ? configuredModel : '';
+                        // Semantic search on but no model resolved: fall back to the first offered one
+                        // rather than showing "Off", which a save would then make true.
+                        if (config.EnableSemanticSearch === true && modelSelect.value === '' && modelSelect.options.length > 1) {
+                            modelSelect.selectedIndex = 1;
+                        } else if (modelSelect.selectedIndex < 0) {
+                            modelSelect.selectedIndex = 0;
+                        }
+
                         document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
                         setNumericInput('#semanticRatio', config.SemanticRatio, 50);
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
@@ -458,7 +527,14 @@
                         config.EnableHealthMonitor = document.querySelector('#enableHealthMonitor').checked;
                         config.HealthCheckIntervalSeconds = parseIntOrDefault(document.querySelector('#healthCheckIntervalSeconds').value, 60);
                         config.Synonyms = document.querySelector('#synonyms').value;
-                        config.EnableSemanticSearch = document.querySelector('#enableSemanticSearch').checked;
+                        // One control, two settings: the model picker's empty option is the off switch,
+                        // and leaving the stored model alone means turning semantic search off and on
+                        // again comes back to the same one.
+                        var selectedModel = document.querySelector('#embeddingModel').value;
+                        config.EnableSemanticSearch = selectedModel !== '';
+                        if (selectedModel !== '') {
+                            config.EmbeddingModelId = selectedModel;
+                        }
                         config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
                         config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 50);
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);

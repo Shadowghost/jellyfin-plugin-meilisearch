@@ -17,18 +17,13 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// <summary>
 /// Owns the local embedding model: downloads it when needed, loads it once, and hands out vectors.
 /// </summary>
-/// <remarks>
-/// Every entry point is safe to call regardless of configuration and never throws into a caller.
-/// While semantic search is disabled this type touches neither ONNX Runtime nor the filesystem, so a
-/// server that leaves the setting off behaves exactly as it did before embeddings existed.
-/// </remarks>
 public sealed class EmbeddingService : IHostedService, IDisposable
 {
     private readonly ILogger<EmbeddingService> _logger;
     private readonly IApplicationPaths _applicationPaths;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
-    private OnnxTextEmbedder? _embedder;
+    private ITextEmbedder? _embedder;
     private EmbeddingCache? _cache;
     private string? _loadedKey;
     private EmbeddingState _state = EmbeddingState.Disabled;
@@ -50,14 +45,19 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     }
 
     /// <summary>
+    /// Gets the model the configuration currently selects.
+    /// </summary>
+    public static EmbeddingModelDefinition ActiveModel => EmbeddingModels.Resolve(Configuration.EmbeddingModelId);
+
+    /// <summary>
     /// Gets the name the vector field is registered under in Meilisearch.
     /// </summary>
-    public static string EmbedderName => EmbeddingModelDescriptor.EmbedderName;
+    public static string EmbedderName => ActiveModel.EmbedderName;
 
     /// <summary>
     /// Gets the width of the vectors this service produces.
     /// </summary>
-    public static int Dimensions => EmbeddingModelDescriptor.Dimensions;
+    public static int Dimensions => ActiveModel.Dimensions;
 
     /// <summary>
     /// Gets a value indicating whether semantic search is switched on in the configuration.
@@ -114,10 +114,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// </summary>
     /// <param name="document">The document to describe.</param>
     /// <returns>A single string combining the item's identifying and descriptive metadata.</returns>
-    /// <remarks>
-    /// Ordered most to least identifying, because the token budget truncates from the end: a long
-    /// overview must never push the title out of the embedded text.
-    /// </remarks>
     public static string BuildDocumentText(MeilisearchDocument document)
     {
         ArgumentNullException.ThrowIfNull(document);
@@ -269,6 +265,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             _state = EmbeddingState.Initializing;
             _error = null;
 
+            EmbeddingStorageMigration.MigrateModelFiles(descriptor, GetModelRootDirectory(), _logger);
+
             if (!descriptor.IsComplete())
             {
                 if (!Configuration.AutoDownloadEmbeddingModel)
@@ -284,8 +282,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
                 await downloader.DownloadAsync(descriptor, progress, cancellationToken).ConfigureAwait(false);
             }
 
-            _embedder = OnnxTextEmbedder.Load(descriptor, Configuration.EmbeddingThreads, _logger);
-            _cache = OpenCache();
+            _embedder = descriptor.Definition.CreateEmbedder(descriptor, Configuration.EmbeddingThreads, _logger);
+            _cache = OpenCache(descriptor.Definition);
             _loadedKey = key;
 
             // Loading takes minutes when it includes the download, and semantic search may have been
@@ -335,10 +333,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <param name="searchTerm">The search term.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The query vector, or null when semantic search is not available.</returns>
-    /// <remarks>
-    /// Never initializes anything: a search must not pay for a model load, let alone a download. If
-    /// the model is not loaded yet this returns null and the query runs as pure keyword search.
-    /// </remarks>
     public double[]? EmbedQuery(string searchTerm, CancellationToken cancellationToken)
     {
         if (!IsReady || string.IsNullOrWhiteSpace(searchTerm))
@@ -346,7 +340,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return null;
         }
 
-        var prompt = EmbeddingModelDescriptor.QueryPrompt + " " + searchTerm;
+        var queryPrompt = ActiveModel.QueryPrompt;
+        var prompt = queryPrompt.Length == 0 ? searchTerm : queryPrompt + " " + searchTerm;
         var vectors = EmbedInternal([prompt], cancellationToken);
         if (vectors.Count == 0 || vectors[0] is not { Length: > 0 } vector)
         {
@@ -368,10 +363,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <param name="texts">The document texts, as built by <see cref="BuildDocumentText"/>.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>One vector per input in the same order; an entry is null when it could not be embedded.</returns>
-    /// <remarks>
-    /// Texts already present in the on-disk cache are served from it and only the rest reach the
-    /// model, which is what makes a rebuild of an unchanged library cheap.
-    /// </remarks>
     public IReadOnlyList<float[]?> EmbedDocuments(IReadOnlyList<string> texts, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(texts);
@@ -427,10 +418,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// Starts recording which cached vectors are in use, so <see cref="EndCacheRetention"/> can drop
     /// the rest. A no-op when the cache is not open.
     /// </summary>
-    /// <remarks>
-    /// Intended to bracket a full rebuild, which embeds every item in the library and so touches
-    /// exactly the entries worth keeping.
-    /// </remarks>
     public void BeginCacheRetention() => _cache?.BeginRetentionScope();
 
     /// <summary>
@@ -447,12 +434,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// </summary>
     /// <param name="documents">The documents to embed.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <remarks>
-    /// A no-op when semantic search is off or the model is not loaded, which leaves
-    /// <see cref="MeilisearchDocument.Vectors"/> null so the field is omitted from the payload.
-    /// Documents that fail to embed are simply left without a vector: they stay findable by keyword,
-    /// and the next reindex picks them up again.
-    /// </remarks>
     public void AttachVectors(IReadOnlyList<MeilisearchDocument> documents, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(documents);
@@ -483,23 +464,26 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Gets the model directory currently in effect.
+    /// Gets the directory the selected model's files live in.
     /// </summary>
     /// <returns>The absolute path of the model directory.</returns>
     public string GetModelDirectory()
-    {
-        var configured = Configuration.EmbeddingModelPath;
-        return string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(_applicationPaths.DataPath, "meilisearch-embeddings")
-            : configured;
-    }
+        => Path.Combine(GetModelRootDirectory(), ActiveModel.Id);
 
     /// <summary>
     /// Builds a descriptor for the configured model.
     /// </summary>
     /// <returns>The descriptor.</returns>
     public EmbeddingModelDescriptor CreateDescriptor()
-        => new(GetModelDirectory());
+        => new(ActiveModel, GetModelDirectory());
+
+    private string GetModelRootDirectory()
+    {
+        var configured = Configuration.EmbeddingModelPath;
+        return string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(_applicationPaths.DataPath, "meilisearch-embeddings")
+            : configured;
+    }
 
     private IReadOnlyList<float[]?> EmbedInternal(IReadOnlyList<string> texts, CancellationToken cancellationToken)
     {
@@ -543,14 +527,10 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 #pragma warning restore CA1031
     }
 
-    /// <summary>
-    /// Identifies the loaded state, so a configuration change that invalidates it forces a reload.
-    /// The cache settings are part of it: toggling the cache has to reach a service that is already
-    /// initialized, and reloading is the one path that reopens it.
-    /// </summary>
     private static string BuildKey(EmbeddingModelDescriptor descriptor)
         => string.Join(
             '|',
+            descriptor.Definition.Id,
             descriptor.Directory,
             Configuration.EmbeddingThreads.ToString(CultureInfo.InvariantCulture),
             Configuration.EnableEmbeddingCache ? "cache" : "nocache",
@@ -607,18 +587,21 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             CancellationToken.None);
     }
 
-    private EmbeddingCache? OpenCache()
+    private EmbeddingCache? OpenCache(EmbeddingModelDefinition definition)
     {
         if (!Configuration.EnableEmbeddingCache)
         {
             return null;
         }
 
-        // Under the data path, not the cache path: see the remarks on EmbeddingCache.
+        var root = Path.Combine(_applicationPaths.DataPath, "meilisearch-embedding-cache");
+        var directory = Path.Combine(root, definition.Id);
+        EmbeddingStorageMigration.MigrateVectorCache(definition.Id, root, directory, _logger);
+
         return EmbeddingCache.Open(
-            Path.Combine(_applicationPaths.DataPath, "meilisearch-embedding-cache"),
-            EmbeddingModelDescriptor.Repository + "/" + EmbeddingModelDescriptor.Variant,
-            Dimensions,
+            directory,
+            definition.Fingerprint,
+            definition.Dimensions,
             Math.Max(0, Configuration.EmbeddingCacheMaxEntries),
             _logger);
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.Meilisearch.Embeddings;
@@ -80,7 +81,9 @@ public class MeilisearchController : ControllerBase
             Error: health.Error,
             SemanticSearchEnabled: _embeddings.IsEnabled,
             EmbeddingState: _embeddings.State.ToString(),
+            EmbeddingModel: _embeddings.IsEnabled ? EmbeddingService.ActiveModel.DisplayName : null,
             EmbeddingModelDirectory: _embeddings.IsEnabled ? _embeddings.GetModelDirectory() : null,
+            EmbeddingModelRebuildRequired: IsEmbeddingModelStale(),
             EmbeddingError: _embeddings.Error,
             EmbeddingCacheCount: _embeddings.CachedVectorCount,
             EmbeddingCacheHitRate: _embeddings.CacheHitRate,
@@ -89,6 +92,44 @@ public class MeilisearchController : ControllerBase
             SearchCount: _client.SearchCount);
 
         return Ok(response);
+    }
+
+    /// <summary>
+    /// Lists the embedding models this build can run.
+    /// </summary>
+    /// <response code="200">Models returned.</response>
+    /// <returns>The available embedding models, in the order the settings page should list them.</returns>
+    /// <remarks>
+    /// Served rather than hard-coded into the settings page so adding a model stays a single change
+    /// in <see cref="EmbeddingModels"/>.
+    /// </remarks>
+    [HttpGet("EmbeddingModels")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IReadOnlyList<EmbeddingModelResponse>> GetEmbeddingModels()
+        => Ok(EmbeddingModels.All
+            .Select(model => new EmbeddingModelResponse(
+                model.Id,
+                model.DisplayName,
+                model.Dimensions,
+                model.ApproximateDownloadMegabytes,
+                model.Repository))
+            .ToList());
+
+    /// <summary>
+    /// Determines whether the index was last built with a different embedding model than the one now
+    /// selected, which leaves semantic search keyword-only until a rebuild.
+    /// </summary>
+    private static bool IsEmbeddingModelStale()
+    {
+        var configuration = Plugin.Instance?.Configuration;
+        if (configuration is null || !configuration.EnableSemanticSearch)
+        {
+            return false;
+        }
+
+        var indexed = configuration.IndexedEmbeddingModelId;
+        return !string.IsNullOrEmpty(indexed)
+            && !string.Equals(indexed, EmbeddingService.ActiveModel.Id, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -6,7 +6,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
-using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Plugin.Meilisearch.Embeddings;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -183,11 +182,6 @@ public class ReindexTask : IScheduledTask
 
         try
         {
-            // Opened inside the try so the finally below always closes it again. A full rebuild
-            // embeds every item in the library, which makes it both the run that benefits most from
-            // the vector cache and the only point at which we can tell which cached vectors are still
-            // in use: entries this run never touches belong to metadata that has since been edited or
-            // to items that have since been deleted.
             _embeddings.BeginCacheRetention();
 
             _logger.LogInformation("Resetting Meilisearch index");
@@ -396,6 +390,9 @@ public class ReindexTask : IScheduledTask
             {
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
                 plugin.Configuration.IndexSchemaVersion = MeilisearchDocument.SchemaVersion;
+                plugin.Configuration.IndexedEmbeddingModelId = _embeddings.IsReady
+                    ? EmbeddingService.ActiveModel.Id
+                    : string.Empty;
                 plugin.SaveConfiguration();
                 _logger.LogInformation("Updated incremental sync watermark to {RunStart:O}", runStart);
             }
