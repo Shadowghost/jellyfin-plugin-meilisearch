@@ -80,7 +80,9 @@ jobs:
           ### Changes since main
           NOTES_HEADER
 
-          echo '${{ steps.version.outputs.changelog }}' >> /tmp/release-notes.md
+          # Via the environment, never inlined: commit subjects contain quotes and
+          # other characters the shell would otherwise interpret.
+          printf '%s\n' "$CHANGELOG" >> /tmp/release-notes.md
 
           gh release create "${{ steps.version.outputs.tag }}" artifacts/*.zip \
             --title "Unstable ${{ steps.version.outputs.version }} (${{ steps.version.outputs.sha_short }})" \
@@ -89,6 +91,7 @@ jobs:
             --target "${{ github.sha }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.version.outputs.changelog }}
 
       - name: Prune old unstable releases
         # Keep the same number of unstable-* releases that the manifest retains
