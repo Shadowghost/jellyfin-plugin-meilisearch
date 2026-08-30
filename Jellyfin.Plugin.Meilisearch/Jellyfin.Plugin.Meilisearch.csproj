@@ -41,43 +41,36 @@
     <EmbeddedResource Include="Configuration/configPage.html" />
   </ItemGroup>
 
-  <!--
-    Restage ONNX Runtime's native libraries out of runtimes/ and into native/.
+  <PropertyGroup>
+    <OnnxRuntimeAllPlatforms>linux-x64;linux-arm64;osx-arm64;win-x64;win-arm64</OnnxRuntimeAllPlatforms>
+    <OnnxRuntimeBuildPlatforms Condition="'$(OnnxRuntimeBuildPlatforms)' == ''">$(NETCoreSdkRuntimeIdentifier)</OnnxRuntimeBuildPlatforms>
+    <OnnxRuntimeBuildPlatforms Condition="'$(OnnxRuntimeBuildPlatforms)' == ''">linux-x64</OnnxRuntimeBuildPlatforms>
+    <OnnxRuntimePublishPlatforms Condition="'$(OnnxRuntimePublishPlatforms)' == ''">$(OnnxRuntimeAllPlatforms)</OnnxRuntimePublishPlatforms>
 
-    Jellyfin's plugin loader discovers assemblies with
-    Directory.GetFiles(pluginDir, "*.dll", SearchOption.AllDirectories) and calls
-    LoadFromAssemblyPath on every hit. A native Windows onnxruntime.dll under runtimes/ is not a
-    managed assembly, so that call throws and the catch-all marks the entire plugin Malfunctioned -
-    on every platform, not just Windows. Giving the Windows natives a non-.dll extension keeps them
-    out of that scan; OnnxRuntimeNativeLoader loads them by full path, which does not care about the
-    extension. The .so and .dylib natives are never scanned, so they keep their real names.
+    <!-- Set by the staging target's re-entrant build; a plain evaluation wants every platform. -->
+    <OnnxNativePlatforms Condition="'$(OnnxNativePlatforms)' == ''">$(OnnxRuntimeAllPlatforms)</OnnxNativePlatforms>
+  </PropertyGroup>
 
-    This also drops the mobile natives and Windows link libraries, which a server cannot use and
-    which account for over 100 MB.
-
-    It has to happen for `dotnet publish` as well as `dotnet build`, not just one of them: JPRM
-    packages the publish output, and publish resolves the runtimes/ tree from the NuGet assets
-    independently of whatever the build left in bin/. Staging only after Build produces a package
-    with no native/ directory at all, and the plugin then fails to load ONNX Runtime at runtime.
-  -->
   <ItemGroup>
     <!-- Source path relative to the output root, paired with where it is staged to. -->
-    <OnnxRuntimeNative Include="runtimes/linux-x64/native/libonnxruntime.so">
+    <OnnxRuntimeNative Include="runtimes/linux-x64/native/libonnxruntime.so"
+                       Condition="$(OnnxNativePlatforms.Contains('linux-x64'))">
       <StagedPath>native/linux-x64/libonnxruntime.so</StagedPath>
     </OnnxRuntimeNative>
-    <OnnxRuntimeNative Include="runtimes/linux-arm64/native/libonnxruntime.so">
+    <OnnxRuntimeNative Include="runtimes/linux-arm64/native/libonnxruntime.so"
+                       Condition="$(OnnxNativePlatforms.Contains('linux-arm64'))">
       <StagedPath>native/linux-arm64/libonnxruntime.so</StagedPath>
     </OnnxRuntimeNative>
-    <OnnxRuntimeNative Include="runtimes/osx-arm64/native/libonnxruntime.dylib">
+    <OnnxRuntimeNative Include="runtimes/osx-arm64/native/libonnxruntime.dylib"
+                       Condition="$(OnnxNativePlatforms.Contains('osx-arm64'))">
       <StagedPath>native/osx-arm64/libonnxruntime.dylib</StagedPath>
     </OnnxRuntimeNative>
-    <OnnxRuntimeNative Include="runtimes/osx-x64/native/libonnxruntime.dylib">
-      <StagedPath>native/osx-x64/libonnxruntime.dylib</StagedPath>
-    </OnnxRuntimeNative>
-    <OnnxRuntimeNative Include="runtimes/win-x64/native/onnxruntime.dll">
+    <OnnxRuntimeNative Include="runtimes/win-x64/native/onnxruntime.dll"
+                       Condition="$(OnnxNativePlatforms.Contains('win-x64'))">
       <StagedPath>native/win-x64/onnxruntime.nativelib</StagedPath>
     </OnnxRuntimeNative>
-    <OnnxRuntimeNative Include="runtimes/win-arm64/native/onnxruntime.dll">
+    <OnnxRuntimeNative Include="runtimes/win-arm64/native/onnxruntime.dll"
+                       Condition="$(OnnxNativePlatforms.Contains('win-arm64'))">
       <StagedPath>native/win-arm64/onnxruntime.nativelib</StagedPath>
     </OnnxRuntimeNative>
   </ItemGroup>
@@ -85,13 +78,13 @@
   <Target Name="StageOnnxRuntimeNativesInBuildOutput" AfterTargets="Build">
     <MSBuild Projects="$(MSBuildProjectFullPath)"
              Targets="StageOnnxRuntimeNatives"
-             Properties="OnnxNativeStageRoot=$(OutDir);TargetFramework=$(TargetFramework)" />
+             Properties="OnnxNativeStageRoot=$(OutDir);OnnxNativePlatforms=$(OnnxRuntimeBuildPlatforms);TargetFramework=$(TargetFramework)" />
   </Target>
 
   <Target Name="StageOnnxRuntimeNativesInPublishOutput" AfterTargets="Publish">
     <MSBuild Projects="$(MSBuildProjectFullPath)"
              Targets="StageOnnxRuntimeNatives"
-             Properties="OnnxNativeStageRoot=$(PublishDir);TargetFramework=$(TargetFramework)" />
+             Properties="OnnxNativeStageRoot=$(PublishDir);OnnxNativePlatforms=$(OnnxRuntimePublishPlatforms);TargetFramework=$(TargetFramework)" />
   </Target>
 
   <Target Name="StageOnnxRuntimeNatives">
@@ -99,9 +92,10 @@
       <OnnxNativeToStage Include="@(OnnxRuntimeNative)" Condition="Exists('$(OnnxNativeStageRoot)%(Identity)')" />
     </ItemGroup>
 
+    <RemoveDir Directories="$(OnnxNativeStageRoot)native" ContinueOnError="true" />
+
     <Copy SourceFiles="@(OnnxNativeToStage->'$(OnnxNativeStageRoot)%(Identity)')"
-          DestinationFiles="@(OnnxNativeToStage->'$(OnnxNativeStageRoot)%(StagedPath)')"
-          SkipUnchangedFiles="true" />
+          DestinationFiles="@(OnnxNativeToStage->'$(OnnxNativeStageRoot)%(StagedPath)')" />
     <RemoveDir Directories="$(OnnxNativeStageRoot)runtimes" ContinueOnError="true" />
   </Target>
 </Project>

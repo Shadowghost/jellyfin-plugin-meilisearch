@@ -97,6 +97,21 @@ dotnet build -c Release
 
 ### From the plugin repository (recommended)
 
+ONNX Runtime ships a native library per platform, each 15-30 MB. The release artifact carries all of
+them - JPRM builds it with `dotnet publish`, which stages every platform - but a plain `dotnet build`
+stages only the machine it runs on, since a development build is only ever used there. Point it
+somewhere else when you build here and deploy elsewhere:
+
+```bash
+dotnet build -p:OnnxRuntimeBuildPlatforms=linux-x64
+
+# Several at once - the separator has to be escaped as %3B, or the CLI reads it as another switch
+dotnet build -p:OnnxRuntimeBuildPlatforms=linux-x64%3Bwin-x64
+```
+
+There is no `osx-x64` native: ONNX Runtime no longer ships one, so semantic search cannot run on
+Intel Macs. Keyword search is unaffected.
+
 1. In Jellyfin, go to **Dashboard > Plugins > Repositories**.
 2. Add a new repository:
    - **Name**: `Meilisearch`
@@ -114,9 +129,10 @@ dotnet build -c Release
 2. Copy these from `bin/Release/net10.0/` to your Jellyfin plugins directory:
    - `Jellyfin.Plugin.Meilisearch.dll` and `Meilisearch.dll`
    - For semantic search only: `Microsoft.ML.OnnxRuntime.dll`, `Microsoft.ML.Tokenizers.dll`,
-     `System.Numerics.Tensors.dll`, `Google.Protobuf.dll`, and the `runtimes/` directory
-     (keeping its structure - the plugin looks for the native library both next to itself and
-     under `runtimes/<rid>/native/`). Omit all of these to run keyword-only.
+     `System.Numerics.Tensors.dll`, `Google.Protobuf.dll`, and the `native/` directory (keeping its
+     structure - the plugin looks for the native library there, under `native/<rid>/`, as well as
+     next to itself and under `runtimes/<rid>/native/`). A plain build stages only the building
+     machine's own platform there; see [Building](#building). Omit all of these to run keyword-only.
 
    The plugins directory is:
    - Linux: `~/.local/share/jellyfin/plugins/Meilisearch/`
