@@ -32,12 +32,6 @@ public enum EmbeddingState
     Ready,
 
     /// <summary>
-    /// Enabled and downloaded, but released from memory on request. Searches run keyword-only until
-    /// something loads it again - a reindex, or saving the plugin configuration.
-    /// </summary>
-    Unloaded,
-
-    /// <summary>
     /// Initialization failed. Keyword search continues to work unaffected.
     /// </summary>
     Failed
