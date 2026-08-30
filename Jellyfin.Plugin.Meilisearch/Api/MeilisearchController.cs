@@ -116,6 +116,26 @@ public class MeilisearchController : ControllerBase
             .ToList());
 
     /// <summary>
+    /// Releases the embedding model from memory without turning semantic search off.
+    /// </summary>
+    /// <response code="200">The model was released, or there was nothing to release.</response>
+    /// <response code="409">A reindex is running, or the model is still loading; nothing was released.</response>
+    /// <returns>What happened.</returns>
+    [HttpPost("UnloadEmbeddingModel")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public ActionResult<UnloadOutcome> UnloadEmbeddingModel()
+    {
+        var outcome = _embeddings.RequestUnload();
+
+        // A refusal is a conflict with state the caller has to resolve first - a running reindex, or
+        // a load in progress - rather than a bad request or a success.
+        return outcome is UnloadOutcome.ReindexRunning or UnloadOutcome.Busy
+            ? Conflict(outcome)
+            : Ok(outcome);
+    }
+
+    /// <summary>
     /// Determines whether the index was last built with a different embedding model than the one now
     /// selected, which leaves semantic search keyword-only until a rebuild.
     /// </summary>
