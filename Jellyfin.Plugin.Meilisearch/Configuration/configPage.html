@@ -98,6 +98,14 @@
                             model mean nothing to another.
                         </div>
                     </div>
+                    <div id="semanticUnsupportedNotice" class="fieldDescription"
+                         style="display: none; margin-bottom: 1em; padding: 0.75em; border-left: 3px solid #cc3333;">
+                        <strong>This server cannot run a local embedding model.</strong>
+                        <span id="semanticUnsupportedReason"></span>
+                        The settings below have no effect until that is resolved; keyword search is
+                        unaffected. Set <em>Embedding Model</em> back to <em>Off</em> to stop the plugin
+                        retrying on every start.
+                    </div>
                     <label class="checkboxContainer">
                         <input is="emby-checkbox" type="checkbox" id="autoDownloadEmbeddingModel" />
                         <span>Download the model automatically</span>
@@ -298,6 +306,29 @@
                 }
             }
 
+            // Disabled rather than hidden: an admin on an unsupported host still has to be able to
+            // read what is configured, and the model picker is also the off switch, so it stays live.
+            var SEMANTIC_TUNING_CONTROLS = [
+                '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
+                '#embeddingBatchSize', '#embeddingThreads', '#binaryQuantizeVectors',
+                '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath'
+            ];
+
+            function setSemanticUnsupported(unsupported, reason) {
+                var notice = document.querySelector('#semanticUnsupportedNotice');
+                if (notice) {
+                    notice.style.display = unsupported ? '' : 'none';
+                    document.querySelector('#semanticUnsupportedReason').textContent = reason ? ' ' + reason + ' ' : ' ';
+                }
+
+                SEMANTIC_TUNING_CONTROLS.forEach(function (selector) {
+                    var el = document.querySelector(selector);
+                    if (el) {
+                        el.disabled = unsupported;
+                    }
+                });
+            }
+
             function renderStatus(stats) {
                 var lines = [];
 
@@ -342,18 +373,22 @@
                     lines.push('<div style="color:red; margin-top: 0.5em;"><strong>Error:</strong> ' + escapeHtml(error) + '</div>');
                 }
 
+                var embeddingState = pick(stats, 'EmbeddingState') || 'Unknown';
+                setSemanticUnsupported(embeddingState === 'Unsupported', pick(stats, 'EmbeddingError'));
+
                 if (pick(stats, 'SemanticSearchEnabled')) {
-                    var embeddingState = pick(stats, 'EmbeddingState') || 'Unknown';
                     var stateColors = {
                         Ready: 'green',
                         Initializing: 'orange',
                         NotDownloaded: 'orange',
+                        Unsupported: 'red',
                         Failed: 'red'
                     };
                     var stateLabels = {
                         Ready: '✓ Ready',
                         Initializing: 'Downloading or loading…',
                         NotDownloaded: 'Model not downloaded',
+                        Unsupported: '✗ Not supported on this platform',
                         Failed: '✗ Failed'
                     };
                     lines.push('<div style="margin-top: 0.5em;"><strong>Semantic search:</strong> <span style="color:'

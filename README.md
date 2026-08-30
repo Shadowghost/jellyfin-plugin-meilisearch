@@ -65,6 +65,10 @@ docker run -d -p 7700:7700 -v $(pwd)/meili_data:/meili_data \
 
 - Meilisearch 1.10 or newer, for vector search support
 - ~610 MB of free disk space for the model, and roughly 1-2 GB of RAM while it is loaded
+- A platform ONNX Runtime publishes a native library for: Linux and Windows on x64 or arm64, and
+  macOS on Apple silicon. Intel Macs are out - ONNX Runtime no longer ships an `osx-x64` build. On
+  an unsupported host the plugin says so in the log and the **Status** panel and downloads nothing;
+  keyword search is unaffected.
 
 ### Build Requirements
 
@@ -428,7 +432,8 @@ again; nothing is lost either way.
 | Too many loosely related results | Set **Matching Strategy** to `all`, which returns only items matching every word of the query. |
 | Log says the `frequency` matching strategy was rejected | The server predates Meilisearch 1.11. The plugin has already fallen back to `last`; upgrade Meilisearch to get `frequency`. |
 | Pending sync operations after an unclean shutdown | They are persisted to a JSON file in the plugin's configuration directory and replayed on the next start. |
-| Status shows semantic search `Failed` | The log carries the reason. Most often the model download was interrupted (delete the model directory and retry) or the ONNX Runtime native library could not be loaded on this platform. Keyword search is unaffected either way. |
+| Status shows semantic search `Failed` | The log carries the reason. Most often the model download was interrupted - delete the model's directory and retry. Keyword search is unaffected either way. |
+| Status shows `Not supported on this platform` | ONNX Runtime has no native library for this OS and architecture, or the package was assembled without it. The **Status** panel names which. Nothing is downloaded while this is the case; either install ONNX Runtime system-wide or turn semantic search off. |
 | Status shows `Model not downloaded` | Automatic download is off. Run the **Download Meilisearch Embedding Model** task. |
 | Semantic search is `Ready` but results are unchanged | The existing documents have no vectors yet. Run **Rebuild Meilisearch Index**. |
 | Registering the embedder failed | Vector search needs Meilisearch 1.10 or newer. Older servers keep working as keyword-only. |

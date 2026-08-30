@@ -63,6 +63,15 @@ public class DownloadEmbeddingModelTask : IScheduledTask
             return;
         }
 
+        if (!_embeddings.IsPlatformSupported(out var reason))
+        {
+            _logger.LogWarning(
+                "Semantic search is not supported on this platform: {Reason}. Nothing was downloaded",
+                reason);
+            progress.Report(100);
+            return;
+        }
+
         var descriptor = _embeddings.CreateDescriptor();
         _logger.LogInformation(
             "Downloading embedding model {Model} from {Repository} into {Directory}",

@@ -139,6 +139,15 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         return builder.ToString();
     }
 
+    /// <summary>
+    /// Turns a lower-case reason fragment, which reads correctly inside a log message, into a
+    /// standalone sentence for the settings page.
+    /// </summary>
+    private static string Describe(string? reason)
+        => string.IsNullOrEmpty(reason)
+            ? "This platform is not supported."
+            : char.ToUpperInvariant(reason[0]) + reason[1..] + ".";
+
     private static void Append(StringBuilder builder, string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -264,6 +273,24 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
             _state = EmbeddingState.Initializing;
             _error = null;
+
+            // Asked before the download, not after: a host ONNX Runtime has no native library for
+            // cannot run any model, and finding that out at the P/Invoke would mean fetching several
+            // hundred megabytes first.
+            if (!OnnxRuntimeNativeLoader.IsNativeLibraryAvailable(_logger, out var unsupportedReason))
+            {
+                _state = EmbeddingState.Unsupported;
+
+                // Stands on its own: the state already says "not supported on this platform" wherever
+                // this is shown, so repeating that here would read as a stutter.
+                _error = Describe(unsupportedReason);
+                _logger.LogWarning(
+                    "Semantic search is enabled but cannot run on this platform: {Reason}. "
+                    + "No model will be downloaded; turn semantic search off to stop retrying, or install "
+                    + "ONNX Runtime system-wide. Keyword search is unaffected",
+                    unsupportedReason);
+                return false;
+            }
 
             EmbeddingStorageMigration.MigrateModelFiles(descriptor, GetModelRootDirectory(), _logger);
 
@@ -462,6 +489,14 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Determines whether this host can run a local embedding model at all.
+    /// </summary>
+    /// <param name="reason">When it cannot, a short explanation suitable for an admin.</param>
+    /// <returns><c>true</c> when ONNX Runtime's native library is available here.</returns>
+    public bool IsPlatformSupported(out string? reason)
+        => OnnxRuntimeNativeLoader.IsNativeLibraryAvailable(_logger, out reason);
 
     /// <summary>
     /// Gets the directory the selected model's files live in.
