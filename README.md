@@ -15,9 +15,9 @@ A Jellyfin plugin that integrates [Meilisearch](https://www.meilisearch.com/) as
 - Real-time index synchronization with a debounced, coalesced, persisted queue
 - Scheduled tasks for full and incremental reindexing
 - Background health monitor that pauses sync when Meilisearch is unreachable
-- Live status panel (document count, index size, last sync, search latency) in the config page
-- Rebuild and reconnect buttons in the config page
-- Optional semantic search using a locally run embedding model (off by default)
+- Live status panel (document count, index size, last sync, search latency, embedding model state) in the config page
+- Rebuild, reconnect and unload-model buttons in the config page
+- Optional semantic search using a locally run embedding model, picked from a list (off by default)
 - Custom synonyms (e.g. `mcu=marvel`, `lotr=lord of the rings`)
 - Configurable minimum match score threshold and matching strategy
 - Per-type result quotas, so songs matching an artist name can't crowd out the movies and episodes
@@ -169,6 +169,8 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Max Tokens per Item | `256` | How much of each item's metadata is embedded |
 | Embedding Batch Size | `8` | Items per inference pass |
 | Inference Threads | `0` | 0 uses half the available CPU cores |
+| Compress stored vectors | `true` | Binary quantization: 32x smaller in Meilisearch, at some ranking precision |
+| Cache computed vectors on disk | `true` | Reuse vectors across rebuilds instead of recomputing them |
 | Cache Size Limit | `0` | Cap on cached vectors; `0` is unlimited |
 | Model Directory | (empty) | Empty means `<jellyfin-data>/meilisearch-embeddings`; each model gets a subdirectory |
 
@@ -268,7 +270,8 @@ Be deliberate about turning this on - it is a real trade, which is why it ships 
   same cost per changed item. Inference defaults to half your CPU cores to leave headroom for
   transcoding. Later rebuilds are much cheaper thanks to the vector cache below.
 - **~4 KB per item on disk** for that cache, under Jellyfin's data directory.
-- **Index growth.** Meilisearch stores a 1024-dimension float vector per document.
+- **Index growth.** Meilisearch stores one vector per document: 128 bytes with **Compress stored
+  vectors** on, as it ships, or 4 KB of full-precision floats with it off.
 
 Queries themselves stay fast: one short forward pass for the search term, then Meilisearch does
 the vector comparison.
@@ -337,6 +340,16 @@ cached vectors it no longer needed, so the cache tracks the library rather than 
 which is why **Cache Size Limit** defaults to `0`, unlimited. Set one only to cap disk use. The
 **Status** panel reports how many vectors are cached and how many lookups this session were served
 from it.
+
+**Compress stored vectors** is on by default. It stores each vector in Meilisearch at one bit per
+dimension instead of a 32-bit float - 32 times smaller, which is usually the difference between the
+vectors staying in memory and being read from disk on every search, worth seconds on a cold index.
+The trade is some ranking precision in the vector half of a search; keyword matching is exact either
+way. Measured on real library vectors, the compressed top ten keeps about two thirds of the same
+entries, and the ones it swaps in are near-ties from just below the cut, within roughly 1.5% of the
+similarity of what they replace. Turning it back off needs a rebuild, since Meilisearch discards the
+full vectors as it compresses them - but that rebuild reads full precision from the vector cache, so
+it re-uploads rather than re-running the model.
 
 **Max Tokens per Item** trades indexing time for context. The embedded text is ordered
 title → series/album → artists → type → year → genres → studios → tags → people → tagline →
