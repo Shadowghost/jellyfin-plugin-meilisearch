@@ -169,6 +169,20 @@
                             subdirectory.
                         </div>
                     </div>
+                    <div style="margin-bottom: 1em;">
+                        <button is="emby-button" type="button" id="unloadModelBtn" class="raised"><span>Unload Model</span></button>
+                        <span id="unloadModelStatus" style="margin-left: 1em;"></span>
+                    </div>
+                    <div class="fieldDescription" style="margin-bottom: 1em;">
+                        Gives back the 1-2&nbsp;GB the model holds without turning semantic search off, for a server
+                        that is not indexing right now. It stays unloaded until the next reindex, the next time you
+                        save this page, or a restart - searches run keyword-only in the meantime, and items synced
+                        while it is unloaded get no vector until the next rebuild.
+                        <br /><br />
+                        Refused while a reindex is running: releasing the model underneath one would leave every item
+                        it still has to index without a vector, and a rebuild is meant to embed all of them or none.
+                        Cancel the task on the Scheduled Tasks page first if you mean it.
+                    </div>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
                         <strong>After enabling this or changing the model, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong>
                         Vectors are written as items are indexed, so existing documents have none until you rebuild.
@@ -311,7 +325,8 @@
             var SEMANTIC_TUNING_CONTROLS = [
                 '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
                 '#embeddingBatchSize', '#embeddingThreads', '#binaryQuantizeVectors',
-                '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath'
+                '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
+                '#unloadModelBtn'
             ];
 
             function setSemanticUnsupported(unsupported, reason) {
@@ -381,6 +396,7 @@
                         Ready: 'green',
                         Initializing: 'orange',
                         NotDownloaded: 'orange',
+                        Unloaded: 'orange',
                         Unsupported: 'red',
                         Failed: 'red'
                     };
@@ -388,6 +404,7 @@
                         Ready: '✓ Ready',
                         Initializing: 'Downloading or loading…',
                         NotDownloaded: 'Model not downloaded',
+                        Unloaded: 'Released from memory - loads again on the next reindex or save',
                         Unsupported: '✗ Not supported on this platform',
                         Failed: '✗ Failed'
                     };
@@ -609,6 +626,55 @@
                             var message = (error && error.message) ? error.message : (error && error.statusText) ? error.statusText : 'request error';
                             statusSpan.textContent = 'Connection failed: ' + message;
                             statusSpan.style.color = 'red';
+                        });
+                });
+
+            // The endpoint answers with the outcome alone; the wording for each one lives here with
+            // the rest of the page's copy. 200 for Unloaded/NotLoaded, 409 for the two refusals.
+            var UNLOAD_MESSAGES = {
+                Unloaded: ['Model released. Searches run keyword-only until a reindex, a configuration save or a restart loads it again.', 'green'],
+                NotLoaded: ['No model is loaded, so there was nothing to release.', ''],
+                ReindexRunning: ['A reindex is running. Unloading now would leave every item it still has to index without a vector, so nothing was released - cancel the task on the Scheduled Tasks page, or wait for it to finish.', 'orange'],
+                Busy: ['The model is still downloading or loading. Nothing was released; try again once it has finished.', 'orange']
+            };
+
+            document.querySelector('#unloadModelBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#unloadModelStatus');
+                    statusSpan.textContent = 'Unloading...';
+                    statusSpan.style.color = '';
+
+                    function show(outcome, fallback, fallbackColor) {
+                        var known = UNLOAD_MESSAGES[outcome];
+                        statusSpan.textContent = known ? known[0] : fallback;
+                        statusSpan.style.color = known ? known[1] : fallbackColor;
+                        refreshStatus();
+                    }
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/UnloadEmbeddingModel'),
+                        dataType: 'json'
+                    })
+                        .then(function (outcome) {
+                            show(outcome, 'Done.', '');
+                        })
+                        .catch(function (error) {
+                            // A refusal is a 409 whose body is the outcome, and ApiClient rejects with
+                            // the raw fetch Response - so it has to be read back out of it.
+                            if (error && typeof error.json === 'function') {
+                                error.json()
+                                    .then(function (outcome) {
+                                        show(outcome, 'Could not unload the model.', 'red');
+                                    })
+                                    .catch(function () {
+                                        show(null, 'Could not unload the model.', 'red');
+                                    });
+                                return;
+                            }
+
+                            var reason = error && (error.statusText || error.message);
+                            show(null, 'Could not unload the model' + (reason ? ': ' + reason : '.'), 'red');
                         });
                 });
 

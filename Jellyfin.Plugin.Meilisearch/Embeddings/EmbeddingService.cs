@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.Meilisearch.Configuration;
+using Jellyfin.Plugin.Meilisearch.Tasks;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Model.Plugins;
 using Microsoft.Extensions.Hosting;
@@ -280,9 +281,6 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             if (!OnnxRuntimeNativeLoader.IsNativeLibraryAvailable(_logger, out var unsupportedReason))
             {
                 _state = EmbeddingState.Unsupported;
-
-                // Stands on its own: the state already says "not supported on this platform" wherever
-                // this is shown, so repeating that here would read as a stutter.
                 _error = Describe(unsupportedReason);
                 _logger.LogWarning(
                     "Semantic search is enabled but cannot run on this platform: {Reason}. "
@@ -487,6 +485,54 @@ public sealed class EmbeddingService : IHostedService, IDisposable
                     [EmbedderName] = new MeilisearchVector { Embeddings = vector, Regenerate = false }
                 };
             }
+        }
+    }
+
+    /// <summary>
+    /// Releases the model from memory without turning semantic search off.
+    /// </summary>
+    /// <returns>What happened.</returns>
+    public UnloadOutcome RequestUnload()
+    {
+        // Held for the whole operation rather than merely sampled, so a reindex cannot start between
+        // the check and the disposal.
+        if (!ReindexCoordinator.Gate.Wait(0))
+        {
+            _logger.LogInformation("Refusing to unload the embedding model: a reindex is running");
+            return UnloadOutcome.ReindexRunning;
+        }
+
+        try
+        {
+            if (!_initLock.Wait(0))
+            {
+                _logger.LogInformation("Refusing to unload the embedding model: it is still downloading or loading");
+                return UnloadOutcome.Busy;
+            }
+
+            try
+            {
+                if (_embedder is null)
+                {
+                    return UnloadOutcome.NotLoaded;
+                }
+
+                _logger.LogInformation(
+                    "Releasing the embedding model from memory on request; searches run keyword-only until it is loaded again");
+
+                Unload();
+                _state = EmbeddingState.Unloaded;
+                _error = null;
+                return UnloadOutcome.Unloaded;
+            }
+            finally
+            {
+                _initLock.Release();
+            }
+        }
+        finally
+        {
+            ReindexCoordinator.Gate.Release();
         }
     }
 

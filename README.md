@@ -288,6 +288,24 @@ unavailable, only gradually better as vectors land.
 Setting **Embedding Model** back to *Off* releases the model and removes the embedder from
 Meilisearch, which drops the stored vectors and reclaims the index space.
 
+### Freeing the memory again
+
+**Unload Model** in the plugin configuration releases the model from memory - the 1-2 GB it holds -
+without turning semantic search off, losing the download or clearing the vector cache. Useful on a
+server that has finished indexing and is only serving playback.
+
+It stays unloaded until something loads it again: the next reindex, the next time you save the
+plugin configuration, or a restart. Searches run keyword-only in the meantime, and items added or
+edited while it is unloaded are indexed without a vector until the next rebuild - the same as when
+semantic search has never been switched on.
+
+**While a reindex is running, the button refuses** and nothing is released. The model itself can be
+disposed safely at any moment - an inference already in flight is waited for, and calls arriving
+afterwards get no vector rather than an error - but during a rebuild "no vector" means every item
+from that point on is indexed without one, which is precisely the half-vectorized index a rebuild
+exists to avoid. Cancel the task on the Scheduled Tasks page first if you really mean it. The same
+refusal applies while the model is still downloading or loading.
+
 ### Switching models
 
 Each model has its own directory under the model path, its own vector cache and its own Meilisearch
@@ -438,6 +456,8 @@ again; nothing is lost either way.
 | Semantic search is `Ready` but results are unchanged | The existing documents have no vectors yet. Run **Rebuild Meilisearch Index**. |
 | Registering the embedder failed | Vector search needs Meilisearch 1.10 or newer. Older servers keep working as keyword-only. |
 | A rebuild re-embeds everything even though nothing changed | The vector cache starts empty for a model that has never been used, and is discarded if the same model's export or vector width changes. Switching between models does not reset either one's cache. |
+| Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |
+| **Unload Model** says a reindex is running | Deliberate - see [Freeing the memory again](#freeing-the-memory-again). Cancel the task on the Scheduled Tasks page if you mean it, or wait. |
 | Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. Each model caches into its own subdirectory there, so an old model's cache can be deleted on its own. |
 
 ## REST API
@@ -448,6 +468,7 @@ All endpoints require an authenticated administrator and back the config page.
 |--------|-------|---------|
 | `GET` | `/Plugins/Meilisearch/Stats` | Document count, index size, indexing state, field distribution, health, authentication state, last incremental sync timestamp, matching strategy in use, average search latency, embedding model and state |
 | `GET` | `/Plugins/Meilisearch/EmbeddingModels` | The embedding models this build can run, as offered by the model picker |
+| `POST` | `/Plugins/Meilisearch/UnloadEmbeddingModel` | Releases the model from memory. Answers with the outcome - `Unloaded`, `NotLoaded`, or `409` with `ReindexRunning` / `Busy` |
 | `POST` | `/Plugins/Meilisearch/TestConnection` | Reachability and API-key validation |
 | `POST` | `/Plugins/Meilisearch/Reconnect` | Drops the connection, dials again, and reports the resulting state |
 | `POST` | `/Plugins/Meilisearch/Reindex` | Queues the **Rebuild Meilisearch Index** task |
@@ -459,10 +480,11 @@ All endpoints require an authenticated administrator and back the config page.
 - **MeilisearchIndexService** - Hosted service running a bounded, debounced, coalescing sync queue with pause/resume support
 - **SyncQueuePersistence** - Persists pending sync ops across plugin restarts
 - **MeilisearchHealthMonitor** - Hosted service that periodically pings Meilisearch and pauses sync when unreachable
-- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/EmbeddingModels`, `/TestConnection`, `/Reconnect`, `/Reindex`) backing the config page
+- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/EmbeddingModels`, `/UnloadEmbeddingModel`, `/TestConnection`, `/Reconnect`, `/Reindex`) backing the config page
 - **ReindexTask** - Scheduled task for full library reindexing
 - **IncrementalReindexTask** - Hourly scheduled task syncing items modified since the last run
 - **LibraryScanSyncTask** - Post-scan hook that runs the incremental sync once a library scan finishes
+- **ReindexCoordinator** - Process-wide gate that keeps the full and incremental reindex from overlapping, and that unloading the embedding model refuses to cross
 - **EmbeddingService** - Hosted service owning the embedding model's lifecycle; a no-op while semantic search is off
 - **EmbeddingModels** / **EmbeddingModelDefinition** / **EmbeddingModelDescriptor** - The fixed list of runnable models, what each one is (repository, files, vector width, embedder name, query prompt, loader), and where its files live on this server
 - **ITextEmbedder** - The one abstraction a model family has to implement; everything model-specific lives behind it
