@@ -16,7 +16,9 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="Error">Optional error message when the connection or auth check failed.</param>
 /// <param name="SemanticSearchEnabled">Whether semantic search is switched on in the configuration.</param>
 /// <param name="EmbeddingState">The embedding model's lifecycle state.</param>
+/// <param name="EmbeddingModel">Display name of the selected embedding model.</param>
 /// <param name="EmbeddingModelDirectory">Where the embedding model is stored on disk.</param>
+/// <param name="EmbeddingModelRebuildRequired">Whether the index holds vectors from a different embedding model than the one now selected, so a rebuild is needed.</param>
 /// <param name="EmbeddingError">Optional error message from the last embedding initialization attempt.</param>
 /// <param name="EmbeddingCacheCount">Number of vectors held in the on-disk embedding cache, or null when it is not open.</param>
 /// <param name="EmbeddingCacheHitRate">Share of embedding lookups served from that cache since it was opened, 0.0-1.0, or null before the first lookup.</param>
@@ -34,7 +36,9 @@ public sealed record MeilisearchStatsResponse(
     string? Error,
     bool SemanticSearchEnabled,
     string EmbeddingState,
+    string? EmbeddingModel,
     string? EmbeddingModelDirectory,
+    bool EmbeddingModelRebuildRequired,
     string? EmbeddingError,
     int? EmbeddingCacheCount,
     double? EmbeddingCacheHitRate,

@@ -35,7 +35,7 @@ public class DownloadEmbeddingModelTask : IScheduledTask
 
     /// <inheritdoc />
     public string Description =>
-        "Downloads the local embedding model used for semantic search and loads it into memory. "
+        "Downloads the embedding model selected in the plugin settings and loads it into memory. "
         + "Requires several hundred megabytes of disk space.";
 
     /// <inheritdoc />
@@ -65,9 +65,9 @@ public class DownloadEmbeddingModelTask : IScheduledTask
 
         var descriptor = _embeddings.CreateDescriptor();
         _logger.LogInformation(
-            "Downloading embedding model {Repository} ({Variant}) into {Directory}",
-            EmbeddingModelDescriptor.Repository,
-            EmbeddingModelDescriptor.Variant,
+            "Downloading embedding model {Model} from {Repository} into {Directory}",
+            descriptor.Definition.DisplayName,
+            descriptor.Definition.Repository,
             descriptor.Directory);
 
         var downloader = new EmbeddingModelDownloader(_logger);

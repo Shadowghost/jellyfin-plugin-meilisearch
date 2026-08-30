@@ -182,11 +182,6 @@ public class ReindexTask : IScheduledTask
 
         try
         {
-            // Opened inside the try so the finally below always closes it again. A full rebuild
-            // embeds every item in the library, which makes it both the run that benefits most from
-            // the vector cache and the only point at which we can tell which cached vectors are still
-            // in use: entries this run never touches belong to metadata that has since been edited or
-            // to items that have since been deleted.
             _embeddings.BeginCacheRetention();
 
             // Built beside the live index, which keeps answering searches until the swap at the end.
@@ -406,6 +401,9 @@ public class ReindexTask : IScheduledTask
             {
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
                 plugin.Configuration.IndexSchemaVersion = MeilisearchDocument.SchemaVersion;
+                plugin.Configuration.IndexedEmbeddingModelId = _embeddings.IsReady
+                    ? EmbeddingService.ActiveModel.Id
+                    : string.Empty;
                 plugin.SaveConfiguration();
                 _logger.LogInformation("Updated incremental sync watermark to {RunStart:O}", runStart);
             }

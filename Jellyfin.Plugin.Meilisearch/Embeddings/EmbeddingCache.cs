@@ -35,6 +35,16 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// </remarks>
 internal sealed class EmbeddingCache : IDisposable
 {
+    /// <summary>
+    /// The file holding the header and one 16-byte key per entry.
+    /// </summary>
+    internal const string KeysFileName = "keys.bin";
+
+    /// <summary>
+    /// The file holding one vector per entry, at the position of its key.
+    /// </summary>
+    internal const string VectorsFileName = "vectors.bin";
+
     private const int HeaderSize = 32;
     private const int KeySize = 16;
     private const int FormatVersion = 1;
@@ -161,13 +171,13 @@ internal sealed class EmbeddingCache : IDisposable
             Directory.CreateDirectory(directory);
 
             keysHandle = File.OpenHandle(
-                Path.Combine(directory, "keys.bin"),
+                Path.Combine(directory, KeysFileName),
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.None);
 
             vectorsHandle = File.OpenHandle(
-                Path.Combine(directory, "vectors.bin"),
+                Path.Combine(directory, VectorsFileName),
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.None);
@@ -539,8 +549,8 @@ internal sealed class EmbeddingCache : IDisposable
         // file that is several gigabytes for a large library.
         survivors.Sort(static (left, right) => left.Value.CompareTo(right.Value));
 
-        var keysPath = Path.Combine(_directory, "keys.bin");
-        var vectorsPath = Path.Combine(_directory, "vectors.bin");
+        var keysPath = Path.Combine(_directory, KeysFileName);
+        var vectorsPath = Path.Combine(_directory, VectorsFileName);
         var keysTempPath = keysPath + ".tmp";
         var vectorsTempPath = vectorsPath + ".tmp";
 

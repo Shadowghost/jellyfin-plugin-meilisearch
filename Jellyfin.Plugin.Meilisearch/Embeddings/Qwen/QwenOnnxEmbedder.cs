@@ -7,12 +7,12 @@ using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
-namespace Jellyfin.Plugin.Meilisearch.Embeddings;
+namespace Jellyfin.Plugin.Meilisearch.Embeddings.Qwen;
 
 /// <summary>
 /// Runs Qwen3-Embedding locally through ONNX Runtime and turns text into normalized vectors.
 /// </summary>
-public sealed class OnnxTextEmbedder : IDisposable
+public sealed class QwenOnnxEmbedder : ITextEmbedder
 {
     private const string PastKeyValuePrefix = "past_key_values";
     private const string HiddenStateOutput = "last_hidden_state";
@@ -28,6 +28,7 @@ public sealed class OnnxTextEmbedder : IDisposable
 
     private readonly ILogger _logger;
     private readonly QwenEmbeddingTokenizer _tokenizer;
+    private readonly int _dimensions;
     private readonly InferenceSession _session;
     private readonly SessionOptions _sessionOptions;
     private readonly string[] _pastKeyValueNames;
@@ -38,14 +39,16 @@ public sealed class OnnxTextEmbedder : IDisposable
     private readonly object _disposeGate = new();
     private volatile bool _disposed;
 
-    private OnnxTextEmbedder(
+    private QwenOnnxEmbedder(
         ILogger logger,
         QwenEmbeddingTokenizer tokenizer,
+        int dimensions,
         InferenceSession session,
         SessionOptions sessionOptions)
     {
         _logger = logger;
         _tokenizer = tokenizer;
+        _dimensions = dimensions;
         _session = session;
         _sessionOptions = sessionOptions;
 
@@ -60,18 +63,13 @@ public sealed class OnnxTextEmbedder : IDisposable
     }
 
     /// <summary>
-    /// Gets the number of dimensions the produced vectors have.
-    /// </summary>
-    public static int Dimensions => EmbeddingModelDescriptor.Dimensions;
-
-    /// <summary>
     /// Loads the model and tokenizer from disk.
     /// </summary>
     /// <param name="descriptor">The model to load.</param>
     /// <param name="threads">Number of inference threads, or zero to pick a default.</param>
     /// <param name="logger">The logger.</param>
     /// <returns>The loaded embedder.</returns>
-    public static OnnxTextEmbedder Load(EmbeddingModelDescriptor descriptor, int threads, ILogger logger)
+    public static QwenOnnxEmbedder Load(EmbeddingModelDescriptor descriptor, int threads, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         ArgumentNullException.ThrowIfNull(logger);
@@ -104,12 +102,12 @@ public sealed class OnnxTextEmbedder : IDisposable
         }
 
         logger.LogInformation(
-            "Loaded embedding model {Variant} ({Dimensions} dimensions, {Threads} threads)",
-            EmbeddingModelDescriptor.Variant,
-            EmbeddingModelDescriptor.Dimensions,
+            "Loaded embedding model {Model} ({Dimensions} dimensions, {Threads} threads)",
+            descriptor.Definition.DisplayName,
+            descriptor.Definition.Dimensions,
             intraOpThreads.ToString(CultureInfo.InvariantCulture));
 
-        return new OnnxTextEmbedder(logger, tokenizer, session, sessionOptions);
+        return new QwenOnnxEmbedder(logger, tokenizer, descriptor.Definition.Dimensions, session, sessionOptions);
     }
 
     /// <summary>
@@ -122,11 +120,6 @@ public sealed class OnnxTextEmbedder : IDisposable
     /// One vector per input, in the same order. An entry is null when the corresponding text was
     /// empty and produced no tokens to pool, or when the model was released mid-call.
     /// </returns>
-    /// <remarks>
-    /// Releasing the model is a normal lifecycle event - an admin toggling semantic search off, a
-    /// changed thread count, a server shutdown - so a call that races one returns empty vectors
-    /// rather than throwing. The caller degrades to keyword-only behaviour either way.
-    /// </remarks>
     public IReadOnlyList<float[]?> Embed(IReadOnlyList<string> texts, int maxTokens, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(texts);
@@ -246,10 +239,10 @@ public sealed class OnnxTextEmbedder : IDisposable
                 // right of the real tokens and attention here is causal, so the hidden state at the
                 // final real token is identical to what it would be with no padding at all.
                 var lastRealToken = rows[b].Length - 1;
-                var start = ((b * maxLength) + lastRealToken) * Dimensions;
+                var start = ((b * maxLength) + lastRealToken) * _dimensions;
 
-                var vector = new float[Dimensions];
-                hidden.Slice(start, Dimensions).CopyTo(vector);
+                var vector = new float[_dimensions];
+                hidden.Slice(start, _dimensions).CopyTo(vector);
                 Normalize(vector);
 
                 vectors[b] = vector;
@@ -266,9 +259,6 @@ public sealed class OnnxTextEmbedder : IDisposable
         }
     }
 
-    /// <summary>
-    /// Scales a vector to unit length so Meilisearch's cosine comparison behaves as the model intends.
-    /// </summary>
     private static void Normalize(float[] vector)
     {
         double sumOfSquares = 0;
@@ -290,18 +280,6 @@ public sealed class OnnxTextEmbedder : IDisposable
     }
 
     /// <inheritdoc />
-    /// <remarks>
-    /// Blocks until any forward pass already in flight has finished. Freeing the native session
-    /// while ONNX Runtime is still executing on it is a use-after-free inside native code: it does
-    /// not throw, it corrupts the process heap, and the failure surfaces later as nonsensical
-    /// managed exceptions in unrelated code before the runtime aborts and takes Jellyfin with it.
-    /// <para>
-    /// The inference semaphore is deliberately never disposed. A caller blocked in
-    /// <see cref="Embed"/> would otherwise get an <see cref="ObjectDisposedException"/> instead of
-    /// the clean "model released" answer, and <see cref="SemaphoreSlim"/> only holds a disposable
-    /// resource once its wait handle has been used, which this one never does.
-    /// </para>
-    /// </remarks>
     public void Dispose()
     {
         lock (_disposeGate)

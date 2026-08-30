@@ -1140,7 +1140,7 @@ public class MeilisearchClientWrapper : IDisposable
             config.SearchOverviews ? "ov" : "noov",
             config.SearchFilePaths ? "path" : "nopath",
             "|",
-            config.EnableSemanticSearch ? "vec" : "novec",
+            config.EnableSemanticSearch ? "vec:" + EmbeddingModels.Resolve(config.EmbeddingModelId).Id : "novec",
             "|",
             config.BinaryQuantizeVectors ? "bq" : "f32");
 
@@ -1400,6 +1400,8 @@ public class MeilisearchClientWrapper : IDisposable
         {
             if (Configuration.EnableSemanticSearch)
             {
+                await RemoveStaleEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
+
                 await index.UpdateEmbeddersAsync(
                     new Dictionary<string, Embedder>(StringComparer.Ordinal)
                     {
@@ -1439,6 +1441,44 @@ public class MeilisearchClientWrapper : IDisposable
                 "Could not configure the Meilisearch embedder. Vector search needs Meilisearch 1.10 or newer; keyword search is unaffected");
         }
 #pragma warning restore CA1031
+    }
+
+    /// <summary>
+    /// Drops embedders left behind by a different embedding model.
+    /// </summary>
+    /// <remarks>
+    /// Each model registers under its own embedder name, so switching models leaves the previous
+    /// one's registration - and its vectors - in the index. Meilisearch would keep serving them, and
+    /// a hybrid search naming the new embedder would silently ignore every document that only has
+    /// old vectors. Dropping them makes the index consistently vector-less until the rebuild that a
+    /// model switch requires anyway.
+    /// </remarks>
+    private async Task RemoveStaleEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
+    {
+        var existing = await index.GetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
+        if (existing is not { Count: > 0 })
+        {
+            return;
+        }
+
+        var stale = existing.Keys
+            .Where(name => !string.Equals(name, EmbeddingService.EmbedderName, StringComparison.Ordinal))
+            .ToList();
+
+        if (stale.Count == 0)
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "Removing Meilisearch embedder(s) {Stale} left by a previously selected embedding model; "
+            + "run 'Rebuild Meilisearch Index' to embed the library with {EmbedderName}",
+            string.Join(", ", stale),
+            EmbeddingService.EmbedderName);
+
+        // Reset rather than a targeted removal: this clears the current model's registration too,
+        // but the caller re-registers it immediately, and there is nothing else worth preserving.
+        await index.ResetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

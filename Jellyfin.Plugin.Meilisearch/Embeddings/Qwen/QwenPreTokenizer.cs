@@ -3,18 +3,13 @@ using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using Microsoft.ML.Tokenizers;
 
-namespace Jellyfin.Plugin.Meilisearch.Embeddings;
+namespace Jellyfin.Plugin.Meilisearch.Embeddings.Qwen;
 
 /// <summary>
 /// The pre-tokenizer used by the Qwen2/Qwen3 tokenizer family: a GPT-4 style split that keeps
 /// contractions, letter runs, digit runs, punctuation runs and whitespace as separate pieces before
 /// byte-level BPE merges them.
 /// </summary>
-/// <remarks>
-/// This has to match the model's own pre-tokenizer exactly. A different split produces different
-/// token ids, which produces embeddings that are quietly wrong rather than obviously broken - the
-/// vectors still have the right shape and norm, they just encode the wrong thing.
-/// </remarks>
 internal sealed partial class QwenPreTokenizer : PreTokenizer
 {
     [GeneratedRegex(

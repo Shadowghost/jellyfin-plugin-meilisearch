@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text.Json;
 using Microsoft.ML.Tokenizers;
 
-namespace Jellyfin.Plugin.Meilisearch.Embeddings;
+namespace Jellyfin.Plugin.Meilisearch.Embeddings.Qwen;
 
 /// <summary>
 /// Byte-level BPE tokenizer for Qwen3-Embedding, built from the model's <c>vocab.json</c> and
@@ -29,10 +29,10 @@ public sealed class QwenEmbeddingTokenizer
     {
         ArgumentNullException.ThrowIfNull(descriptor);
 
-        var options = new BpeOptions(ReadVocabulary(descriptor.VocabPath))
+        var options = new BpeOptions(ReadVocabulary(descriptor.GetFilePath(QwenEmbeddingModel.VocabFile)))
         {
-            Merges = ReadMerges(descriptor.MergesPath),
-            SpecialTokens = ReadSpecialTokens(descriptor.AddedTokensPath),
+            Merges = ReadMerges(descriptor.GetFilePath(QwenEmbeddingModel.MergesFile)),
+            SpecialTokens = ReadSpecialTokens(descriptor.GetFilePath(QwenEmbeddingModel.AddedTokensFile)),
             ByteLevel = true,
             PreTokenizer = new QwenPreTokenizer(),
 
@@ -49,10 +49,6 @@ public sealed class QwenEmbeddingTokenizer
     /// <param name="text">The text to encode.</param>
     /// <param name="maxTokens">The maximum number of tokens to keep.</param>
     /// <returns>The token ids.</returns>
-    /// <remarks>
-    /// No end-of-sequence token is appended: Qwen3-Embedding's published recipe tokenizes plainly and
-    /// pools the last content token.
-    /// </remarks>
     public long[] Encode(string text, int maxTokens)
     {
         if (string.IsNullOrWhiteSpace(text) || maxTokens <= 0)
