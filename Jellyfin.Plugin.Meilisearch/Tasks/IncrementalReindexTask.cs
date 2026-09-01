@@ -257,6 +257,11 @@ public class IncrementalReindexTask : IScheduledTask
 
             if (batch.Count > 0)
             {
+                if (_embeddings.IsEnabled)
+                {
+                    await _embeddings.EnsureReadyAsync(null, cancellationToken).ConfigureAwait(false);
+                }
+
                 _embeddings.AttachVectors(batch, cancellationToken);
 
                 batchNumber++;

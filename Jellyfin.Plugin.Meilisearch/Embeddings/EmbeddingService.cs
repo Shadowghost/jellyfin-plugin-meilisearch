@@ -20,10 +20,15 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// </summary>
 public sealed class EmbeddingService : IHostedService, IDisposable
 {
+    private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMinutes(1);
+
     private readonly ILogger<EmbeddingService> _logger;
     private readonly IApplicationPaths _applicationPaths;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
+    private long _lastUseTicks = DateTime.UtcNow.Ticks;
+
+    private Timer? _idleTimer;
     private ITextEmbedder? _embedder;
     private EmbeddingCache? _cache;
     private string? _loadedKey;
@@ -192,12 +197,22 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             StartBackgroundInitialization();
         }
 
+        MarkUsed();
+        _idleTimer = new Timer(static state => ((EmbeddingService)state!).OnIdleCheck(), this, IdleCheckInterval, IdleCheckInterval);
+
         return Task.CompletedTask;
     }
 
     /// <inheritdoc />
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        var idleTimer = _idleTimer;
+        _idleTimer = null;
+        if (idleTimer is not null)
+        {
+            await idleTimer.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (Plugin.Instance is { } plugin && _configurationChangedHandler is not null)
         {
             plugin.ConfigurationChanged -= _configurationChangedHandler;
@@ -360,8 +375,19 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <returns>The query vector, or null when semantic search is not available.</returns>
     public double[]? EmbedQuery(string searchTerm, CancellationToken cancellationToken)
     {
-        if (!IsReady || string.IsNullOrWhiteSpace(searchTerm))
+        if (string.IsNullOrWhiteSpace(searchTerm))
         {
+            return null;
+        }
+
+        MarkUsed();
+
+        if (!IsReady)
+        {
+            // An idle unload has to be undone by someone, and a search is the only thing that will
+            // ask. Loading takes seconds, which is far too long to hold a search open, so this one
+            // runs keyword-only and the next is served semantically.
+            ReloadAfterIdleUnload();
             return null;
         }
 
@@ -392,8 +418,16 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(texts);
 
-        if (!IsReady || texts.Count == 0)
+        if (texts.Count == 0)
         {
+            return new float[texts.Count][];
+        }
+
+        MarkUsed();
+
+        if (!IsReady)
+        {
+            ReloadAfterIdleUnload();
             return new float[texts.Count][];
         }
 
@@ -463,8 +497,16 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(documents);
 
-        if (!IsReady || documents.Count == 0)
+        if (documents.Count == 0)
         {
+            return;
+        }
+
+        MarkUsed();
+
+        if (!IsReady)
+        {
+            ReloadAfterIdleUnload();
             return;
         }
 
@@ -492,7 +534,9 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// Releases the model from memory without turning semantic search off.
     /// </summary>
     /// <returns>What happened.</returns>
-    public UnloadOutcome RequestUnload()
+    public UnloadOutcome RequestUnload() => RequestUnload("on request");
+
+    private UnloadOutcome RequestUnload(string reason)
     {
         // Held for the whole operation rather than merely sampled, so a reindex cannot start between
         // the check and the disposal.
@@ -518,7 +562,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
                 }
 
                 _logger.LogInformation(
-                    "Releasing the embedding model from memory on request; searches run keyword-only until it is loaded again");
+                    "Releasing the embedding model from memory {Reason}; searches run keyword-only until it is loaded again",
+                    reason);
 
                 Unload();
                 _state = EmbeddingState.Unloaded;
@@ -534,6 +579,38 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         {
             ReindexCoordinator.Gate.Release();
         }
+    }
+
+    private void MarkUsed() => Interlocked.Exchange(ref _lastUseTicks, DateTime.UtcNow.Ticks);
+
+    private void ReloadAfterIdleUnload()
+    {
+        if (_state == EmbeddingState.Unloaded && Configuration.EnableSemanticSearch)
+        {
+            StartBackgroundInitialization();
+        }
+    }
+
+    private void OnIdleCheck()
+    {
+        var idleMinutes = Configuration.EmbeddingIdleUnloadMinutes;
+        if (idleMinutes <= 0 || _disposed || _state != EmbeddingState.Ready)
+        {
+            return;
+        }
+
+        var idleFor = DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastUseTicks), DateTimeKind.Utc);
+        if (idleFor < TimeSpan.FromMinutes(idleMinutes))
+        {
+            return;
+        }
+
+        // Goes through the same refusals a manual unload does, so an idle window that expires in the
+        // middle of a reindex - which can spend a long time on database and network work between
+        // batches - leaves the model where it is.
+        RequestUnload(string.Create(
+            CultureInfo.InvariantCulture,
+            $"after {idleMinutes} minutes without a vector request"));
     }
 
     /// <summary>
@@ -710,6 +787,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         }
 
         _disposed = true;
+        _idleTimer?.Dispose();
+        _idleTimer = null;
         Unload();
         _cts?.Dispose();
         _cts = null;
