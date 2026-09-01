@@ -771,14 +771,17 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             {
                 pending.Clear();
 
-                // Drain whatever is immediately available.
-                while (reader.TryRead(out var op))
+                var batchSize = Math.Max(1, Configuration.SyncBatchSize);
+                var debounceMs = Math.Max(0, Configuration.SyncBatchDebounceMilliseconds);
+
+                // Drain whatever is immediately available, up to the batch size. Bounded because a
+                // library scan can leave tens of thousands of ops queued, and a single flush that
+                // large produces a request Meilisearch rejects as too big.
+                while (pending.Count < batchSize && reader.TryRead(out var op))
                 {
                     Coalesce(pending, op);
                 }
 
-                var batchSize = Math.Max(1, Configuration.SyncBatchSize);
-                var debounceMs = Math.Max(0, Configuration.SyncBatchDebounceMilliseconds);
                 var deadline = DateTime.UtcNow.AddMilliseconds(debounceMs);
 
                 // Keep accumulating up to batchSize or the debounce deadline (whichever first).
