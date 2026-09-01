@@ -131,6 +131,15 @@
                             0 uses half your CPU cores, leaving headroom for transcoding. Default: 0
                         </div>
                     </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="embeddingIdleUnloadMinutes" min="0" step="1" label="Release Model When Idle (minutes, 0 = never)" />
+                        <div class="fieldDescription">
+                            The model is the largest thing this plugin keeps in memory. Releasing it after a
+                            quiet spell hands that memory back to playback and transcoding, at the cost of the
+                            next search: it is answered on keywords alone while the model reloads, and searches
+                            after it are semantic again. Default: 0
+                        </div>
+                    </div>
                     <label class="checkboxContainer">
                         <input is="emby-checkbox" type="checkbox" id="binaryQuantizeVectors" />
                         <span>Compress stored vectors (binary quantization)</span>
@@ -324,7 +333,7 @@
             // read what is configured, and the model picker is also the off switch, so it stays live.
             var SEMANTIC_TUNING_CONTROLS = [
                 '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
-                '#embeddingBatchSize', '#embeddingThreads', '#binaryQuantizeVectors',
+                '#embeddingBatchSize', '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
                 '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
                 '#unloadModelBtn'
             ];
@@ -544,6 +553,7 @@
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingBatchSize', config.EmbeddingBatchSize, 8);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
+                        setNumericInput('#embeddingIdleUnloadMinutes', config.EmbeddingIdleUnloadMinutes, 0);
                         document.querySelector('#binaryQuantizeVectors').checked = config.BinaryQuantizeVectors !== false;
                         document.querySelector('#enableEmbeddingCache').checked = config.EnableEmbeddingCache !== false;
                         setNumericInput('#embeddingCacheMaxEntries', config.EmbeddingCacheMaxEntries, 0);
@@ -586,6 +596,7 @@
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingBatchSize = parseIntOrDefault(document.querySelector('#embeddingBatchSize').value, 8);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
+                        config.EmbeddingIdleUnloadMinutes = parseIntOrDefault(document.querySelector('#embeddingIdleUnloadMinutes').value, 0);
                         config.BinaryQuantizeVectors = document.querySelector('#binaryQuantizeVectors').checked;
                         config.EnableEmbeddingCache = document.querySelector('#enableEmbeddingCache').checked;
                         config.EmbeddingCacheMaxEntries = parseIntOrDefault(document.querySelector('#embeddingCacheMaxEntries').value, 0);

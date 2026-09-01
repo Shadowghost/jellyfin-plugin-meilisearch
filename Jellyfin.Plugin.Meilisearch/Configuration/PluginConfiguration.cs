@@ -51,6 +51,7 @@ public class PluginConfiguration : BasePluginConfiguration
         EmbeddingMaxTokens = 256;
         EmbeddingBatchSize = 8;
         EmbeddingThreads = 0;
+        EmbeddingIdleUnloadMinutes = 5;
         EnableEmbeddingCache = true;
         EmbeddingCacheMaxEntries = 0;
         BinaryQuantizeVectors = true;
@@ -207,6 +208,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// available processors, leaving headroom for transcoding and the rest of the server.
     /// </summary>
     public int EmbeddingThreads { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many minutes the model may sit unused before it is released from memory,
+    /// or zero to keep it loaded for the life of the server.
+    /// </summary>
+    public int EmbeddingIdleUnloadMinutes { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether computed vectors are kept on disk and reused.

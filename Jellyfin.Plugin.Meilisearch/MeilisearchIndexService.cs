@@ -939,7 +939,15 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             }
         }
 
-        // Embed before pushing so a document and its vector land in the same Meilisearch task.
+        // Embed before pushing so a document and its vector land in the same Meilisearch task. The
+        // model may have been released for sitting idle, and this is a background flush, so it is
+        // worth the seconds to bring it back rather than indexing a document with no vector that
+        // nothing will revisit until the next full rebuild.
+        if (_embeddings.IsEnabled && docsToIndex.Count > 0)
+        {
+            await _embeddings.EnsureReadyAsync(null, cancellationToken).ConfigureAwait(false);
+        }
+
         _embeddings.AttachVectors(docsToIndex, cancellationToken);
 
         var failed = false;
