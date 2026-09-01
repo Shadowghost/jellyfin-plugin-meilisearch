@@ -22,6 +22,13 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     private const int KeyValueHeads = 8;
     private const int HeadDimensions = 128;
 
+    // Padded sequence lengths are rounded up to a multiple of this. ONNX Runtime plans the buffers a
+    // forward pass needs per input shape and sizes its arena to the largest plan it has produced, so
+    // batching to the exact longest row gives it a new shape almost every pass and leaves the arena
+    // holding the high-water mark of all of them. Rounding to a coarse grid collapses a few hundred
+    // shapes into a handful, at a cost of at most this many padding tokens.
+    private const int SequenceLengthGranularity = 32;
+
     // How long Dispose waits for a forward pass that is already running. Inference is bounded by the
     // token budget and batch size, so anything beyond this means the call is wedged rather than slow.
     private static readonly TimeSpan DisposeDrainTimeout = TimeSpan.FromSeconds(60);
@@ -89,6 +96,13 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             InterOpNumThreads = 1,
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        // The weights are the bulk of what a loaded session holds - hundreds of megabytes - and by
+        // default they come out of the same arena the per-pass activations do. The arena only ever
+        // grows, so leaving them in it means every later measurement of "how big did inference get"
+        // is really the weights plus inference, and the two can never be told apart or released
+        // separately. Allocated directly, the arena is left sized for activations alone.
+        sessionOptions.AddSessionConfigEntry("session.use_device_allocator_for_initializers", "1");
 
         InferenceSession session;
         try
@@ -177,7 +191,7 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     private float[][] RunBatch(IReadOnlyList<long[]> rows, CancellationToken cancellationToken)
     {
         var batch = rows.Count;
-        var maxLength = rows.Max(static row => row.Length);
+        var maxLength = RoundUpSequenceLength(rows.Max(static row => row.Length));
 
         var inputIds = new long[batch * maxLength];
         var attentionMask = new long[batch * maxLength];
@@ -228,6 +242,14 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             cancellationToken.ThrowIfCancellationRequested();
 
             using var runOptions = new RunOptions();
+
+            // Jellyfin embeds in bursts: a reindex works through the library and then nothing asks
+            // for a vector again for days. Without this the arena keeps whatever that burst needed
+            // for the life of the server, which is memory a media server would rather spend on
+            // playback. Returning it costs an allocation cycle per pass, against twenty-eight
+            // transformer layers of work in the same pass.
+            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
+
             using var outputs = _session.Run(runOptions, names, values, [HiddenStateOutput]);
 
             var hidden = outputs[0].GetTensorDataAsSpan<float>();
@@ -258,6 +280,12 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             }
         }
     }
+
+    /// <summary>
+    /// Rounds a token count up to the grid the batch is padded to.
+    /// </summary>
+    private static int RoundUpSequenceLength(int length)
+        => (length + SequenceLengthGranularity - 1) / SequenceLengthGranularity * SequenceLengthGranularity;
 
     private static void Normalize(float[] vector)
     {
