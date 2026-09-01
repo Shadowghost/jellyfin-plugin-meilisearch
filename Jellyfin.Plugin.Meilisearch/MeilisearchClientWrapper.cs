@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,6 +23,26 @@ public class MeilisearchClientWrapper : IDisposable
 {
     private const double TaskWaitTimeoutMs = 3 * 60 * 1000;
     private const int TaskWaitIntervalMs = 250;
+
+    // Budget for a single AddDocuments request. Meilisearch rejects payloads over 100 MB by default;
+    // the gap absorbs the error in the size estimate below and any lower limit imposed by a proxy.
+    private const long MaxIndexPayloadBytes = 64L * 1024 * 1024;
+
+    // Enclosing brackets of the JSON array a batch is serialised into.
+    private const int JsonArrayOverheadBytes = 2;
+
+    // Allowance per document for the scalar fields and the property names around the values weighed
+    // individually in EstimateDocumentBytes.
+    private const int DocumentOverheadBytes = 1024;
+
+    // Quotes, separator, and room for escaping in a JSON string value.
+    private const int TextFieldOverheadBytes = 8;
+
+    // "_vectors" key plus the "embeddings"/"regenerate" scaffolding around one embedding.
+    private const int VectorOverheadBytes = 64;
+
+    // One serialised float and its separator, e.g. "-0.052734375,".
+    private const int VectorComponentBytes = 16;
 
     // Weight given to the newest sample in the rolling search-latency average. Low enough that one
     // slow query does not dominate the figure shown on the config page.
@@ -360,16 +381,24 @@ public class MeilisearchClientWrapper : IDisposable
         try
         {
             var docList = documents.ToList();
-            return await ExecuteWithReconnectRetryAsync<int?>(
-                async ct =>
-                {
-                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
-                    var task = await index.AddDocumentsAsync(docList, cancellationToken: ct).ConfigureAwait(false);
-                    _logger.LogDebug("Indexed {Count} documents", docList.Count);
+            int? lastTaskUid = null;
+            foreach (var chunk in SplitForPayloadLimit(docList))
+            {
+                lastTaskUid = await ExecuteWithReconnectRetryAsync<int?>(
+                    async ct =>
+                    {
+                        var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                        var task = await index.AddDocumentsAsync(chunk, cancellationToken: ct).ConfigureAwait(false);
+                        _logger.LogDebug("Indexed {Count} documents", chunk.Count);
 
-                    return task.TaskUid;
-                },
-                cancellationToken).ConfigureAwait(false);
+                        return task.TaskUid;
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            // Meilisearch processes an index's tasks in the order they were enqueued, so awaiting the
+            // last uid covers every chunk of this batch.
+            return lastTaskUid;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -380,6 +409,113 @@ public class MeilisearchClientWrapper : IDisposable
             _logger.LogError(ex, "Error indexing documents batch");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Splits a batch into requests that stay under the server's payload limit. A document carrying a
+    /// 1024-dimension embedding serialises to roughly 12 KB, so a few thousand of them are enough to
+    /// blow past the 100 MB Meilisearch accepts by default and have the whole batch rejected.
+    /// </summary>
+    private static IEnumerable<List<MeilisearchDocument>> SplitForPayloadLimit(List<MeilisearchDocument> documents)
+    {
+        var chunk = new List<MeilisearchDocument>();
+        var chunkBytes = (long)JsonArrayOverheadBytes;
+
+        foreach (var document in documents)
+        {
+            var documentBytes = EstimateDocumentBytes(document);
+
+            if (chunk.Count > 0 && chunkBytes + documentBytes > MaxIndexPayloadBytes)
+            {
+                yield return chunk;
+                chunk = [];
+                chunkBytes = JsonArrayOverheadBytes;
+            }
+
+            chunk.Add(document);
+            chunkBytes += documentBytes;
+        }
+
+        if (chunk.Count > 0)
+        {
+            yield return chunk;
+        }
+    }
+
+    /// <summary>
+    /// Approximates the serialised size of a document. Deliberately an estimate rather than a
+    /// measurement: serialising every batch twice just to weigh it would double the work for the
+    /// common case that fits in a single request. The budget it is compared against leaves enough
+    /// headroom to absorb the error.
+    /// </summary>
+    private static long EstimateDocumentBytes(MeilisearchDocument document)
+    {
+        var bytes = (long)DocumentOverheadBytes;
+
+        bytes += TextBytes(document.Id);
+        bytes += TextBytes(document.Name);
+        bytes += TextBytes(document.OriginalTitle);
+        bytes += TextBytes(document.SortName);
+        bytes += TextBytes(document.Overview);
+        bytes += TextBytes(document.Tagline);
+        bytes += TextBytes(document.ItemType);
+        bytes += TextBytes(document.MediaType);
+        bytes += TextBytes(document.OfficialRating);
+        bytes += TextBytes(document.SeriesName);
+        bytes += TextBytes(document.SeriesId);
+        bytes += TextBytes(document.SeasonName);
+        bytes += TextBytes(document.SeasonId);
+        bytes += TextBytes(document.AlbumName);
+        bytes += TextBytes(document.AlbumId);
+        bytes += TextBytes(document.ParentId);
+        bytes += TextBytes(document.Container);
+        bytes += TextBytes(document.Path);
+        bytes += TextBytes(document.TopParentId);
+        bytes += TextBytes(document.Genres);
+        bytes += TextBytes(document.Tags);
+        bytes += TextBytes(document.Studios);
+        bytes += TextBytes(document.ProductionLocations);
+        bytes += TextBytes(document.Artists);
+        bytes += TextBytes(document.AlbumArtists);
+        bytes += TextBytes(document.People);
+        bytes += TextBytes(document.AncestorIds);
+
+        if (document.ProviderIds is not null)
+        {
+            foreach (var (key, value) in document.ProviderIds)
+            {
+                bytes += TextBytes(key) + TextBytes(value);
+            }
+        }
+
+        if (document.Vectors is not null)
+        {
+            foreach (var (name, vector) in document.Vectors)
+            {
+                bytes += TextBytes(name) + VectorOverheadBytes + ((long)vector.Embeddings.Count * VectorComponentBytes);
+            }
+        }
+
+        return bytes;
+    }
+
+    private static long TextBytes(string? value)
+        => value is null ? 0 : Encoding.UTF8.GetByteCount(value) + TextFieldOverheadBytes;
+
+    private static long TextBytes(IReadOnlyList<string>? values)
+    {
+        if (values is null)
+        {
+            return 0;
+        }
+
+        var bytes = 0L;
+        foreach (var value in values)
+        {
+            bytes += TextBytes(value);
+        }
+
+        return bytes;
     }
 
     /// <summary>
