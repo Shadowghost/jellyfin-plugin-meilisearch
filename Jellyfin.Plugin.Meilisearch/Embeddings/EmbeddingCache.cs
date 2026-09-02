@@ -15,23 +15,13 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// A disk-backed store of document vectors, keyed by the exact text they were produced from.
 /// </summary>
 /// <remarks>
-/// Embedding is by far the most expensive part of indexing - minutes of CPU for a small library,
-/// hours for a large one - and a rebuild re-embeds text that has not changed since the last run. This
-/// turns that back into a file read. A cache hit is only ever returned for byte-identical text, so an
-/// item whose metadata changed is re-embedded as it should be.
-/// <para>
-/// The layout is two parallel fixed-stride files: <c>keys.bin</c> holds a header followed by one
-/// 16-byte key per entry, <c>vectors.bin</c> holds one vector of <c>dimensions</c> floats per entry at
-/// the matching position. Only the keys are read at startup, which is a megabyte or two rather than
-/// the gigabyte the vectors occupy. Appends write the vector before the key, so a crash mid-append
-/// leaves an unreferenced vector rather than a key pointing at garbage, and the length reconciliation
-/// on open discards it.
-/// </para>
-/// <para>
-/// This lives under Jellyfin's data path rather than its cache path on purpose. The content is
-/// regenerable in principle, which is what the cache path is for, but regenerating it costs hours of
-/// CPU, so it should survive the routine cache clears that path invites.
-/// </para>
+/// Embedding dominates indexing - hours for a large library - and a rebuild re-embeds text that has
+/// not changed, which this turns back into a file read. A hit needs byte-identical text, so edited
+/// metadata is re-embedded. Two fixed-stride files: <c>keys.bin</c> of 16-byte keys behind a header,
+/// <c>vectors.bin</c> of one vector per entry at the matching position, so startup reads only the
+/// keys. Appends write the vector first, leaving a crash with an orphaned vector that the length
+/// reconciliation on open discards, rather than a key pointing at nothing. It lives under the data
+/// path, not the cache path, because regenerating it costs hours of CPU.
 /// </remarks>
 internal sealed class EmbeddingCache : IDisposable
 {
@@ -49,11 +39,8 @@ internal sealed class EmbeddingCache : IDisposable
     private const int KeySize = 16;
     private const int FormatVersion = 1;
 
-    // Appends between forced flushes to physical media. Writes reach the operating system
-    // immediately, so nothing here is needed to survive Jellyfin restarting or being killed - only a
-    // host that loses power can lose what the OS has not written out yet. One flush per thousand
-    // vectors bounds that to a few seconds of re-embedding while costing nothing next to the thousand
-    // forward passes that produced them.
+    // Appends between forced flushes. Writes reach the OS immediately, so only a power loss can lose
+    // anything; one flush per thousand vectors bounds that to seconds of re-embedding.
     private const int FlushInterval = 1000;
 
     private static readonly byte[] Magic = "MSEC"u8.ToArray();
@@ -365,9 +352,8 @@ internal sealed class EmbeddingCache : IDisposable
     /// Starts recording which entries are used, so <see cref="EndRetentionScope"/> can drop the rest.
     /// </summary>
     /// <remarks>
-    /// Meant to bracket a full rebuild, which embeds every item in the library and therefore touches
-    /// exactly the entries worth keeping. Everything else is metadata that has since been edited or
-    /// items that have since been deleted.
+    /// Meant to bracket a full rebuild, which touches exactly the entries worth keeping; the rest is
+    /// edited metadata or deleted items.
     /// </remarks>
     public void BeginRetentionScope()
     {
@@ -439,9 +425,8 @@ internal sealed class EmbeddingCache : IDisposable
     /// Forces both files out to physical media. Called with <see cref="_gate"/> held.
     /// </summary>
     /// <remarks>
-    /// Vectors before keys, matching the order they are appended in, so a power loss between the two
-    /// leaves vectors that no key references rather than keys pointing at vectors that never landed.
-    /// The reconciliation in <see cref="Open"/> discards the former; the latter would be unreadable.
+    /// Vectors before keys, as appends do, so a power loss leaves an orphaned vector that
+    /// <see cref="Open"/> discards rather than a key pointing at bytes that never landed.
     /// </remarks>
     private void FlushCore()
     {

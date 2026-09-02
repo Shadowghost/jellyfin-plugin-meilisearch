@@ -102,11 +102,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the Meilisearch matching strategy: <c>frequency</c>, <c>last</c> or <c>all</c>.
     /// </summary>
     /// <remarks>
-    /// <c>frequency</c> (the default) discards the most common word in the library when a query has
-    /// no exact match; <c>last</c> discards words from the end of the query; <c>all</c> returns only
-    /// documents matching every word, trading recall for precision. <c>frequency</c> requires
-    /// Meilisearch 1.11 or newer - on an older server the plugin notices the rejection once and
-    /// falls back to <see cref="FallbackMatchingStrategy"/> for the rest of the session.
+    /// <c>frequency</c> drops the library's most common word when a query has no exact match,
+    /// <c>last</c> drops words from the end, <c>all</c> requires every word. <c>frequency</c> needs
+    /// Meilisearch 1.11 or newer; older servers fall back to
+    /// <see cref="FallbackMatchingStrategy"/> after the first rejection.
     /// </remarks>
     public string MatchingStrategy { get; set; }
 
@@ -161,10 +160,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets a value indicating whether semantic (vector) search is enabled.
     /// </summary>
     /// <remarks>
-    /// Disabled by default. Turning this on makes the plugin download a local embedding model of
-    /// several hundred megabytes, run it on the CPU for every indexed item, and store a 1024-float
-    /// vector per document in Meilisearch. Nothing about embeddings is loaded or executed while this
-    /// is off, so leaving it off keeps the plugin's footprint exactly as it was before.
+    /// Off by default: turning it on downloads several hundred megabytes of model, runs it on the CPU
+    /// for every indexed item and stores a 1024-float vector per document. Nothing embedding-related
+    /// loads or runs while it is off.
     /// </remarks>
     public bool EnableSemanticSearch { get; set; }
 
@@ -173,10 +171,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <see cref="EmbeddingModels"/>. Empty or unknown falls back to <see cref="EmbeddingModels.DefaultId"/>.
     /// </summary>
     /// <remarks>
-    /// Only models this build ships code for can be selected: the tokenizer, the graph inputs and the
-    /// pooling are part of a model, not settings around it. Each one gets its own directory on disk,
-    /// its own vector cache and its own Meilisearch embedder, so switching is reversible - but the
-    /// index has to be rebuilt afterwards, since vectors from one model mean nothing to another.
+    /// Only models this build ships code for, since tokenizer, graph inputs and pooling are part of a
+    /// model rather than settings around it. Each gets its own directory, vector cache and embedder,
+    /// so switching is reversible - but needs a rebuild, as vectors do not carry across models.
     /// </remarks>
     public string EmbeddingModelId { get; set; }
 
@@ -216,10 +213,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// return whatever the vector search ranks highest.
     /// </summary>
     /// <remarks>
-    /// A vector search has no notion of "no match" - every document has some similarity to the query
-    /// - so without a floor a query that matches nothing still fills the result page. Keyword hits
-    /// score 96 and up, clear of any useful value here, so this only trims the vector side. The
-    /// useful value depends on the library, hence a default of zero.
+    /// A vector search has no notion of "no match", so without a floor a query matching nothing still
+    /// fills the page. Keyword hits score 96 and up, so this only trims the vector side. The useful
+    /// value depends on the library, hence a default of zero.
     /// </remarks>
     public int MinimumSemanticScore { get; set; }
 
@@ -251,9 +247,8 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets a value indicating whether computed vectors are kept on disk and reused.
     /// </summary>
     /// <remarks>
-    /// On by default. A rebuild re-embeds the whole library, and unchanged metadata yields an
-    /// identical vector, so this turns hours of inference back into a file read. Costs about four
-    /// kilobytes per item on disk.
+    /// On by default: unchanged metadata yields an identical vector, so a rebuild becomes a file read
+    /// instead of hours of inference, at about four kilobytes per item on disk.
     /// </remarks>
     public bool EnableEmbeddingCache { get; set; }
 
@@ -262,16 +257,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// bit per dimension instead of a 32-bit float.
     /// </summary>
     /// <remarks>
-    /// On by default: 32 times smaller - a gigabyte down to tens of megabytes for a 300k-item library
-    /// - which keeps the vectors resident instead of paged in per query, worth seconds on a cold
-    /// search. The cost is some ranking precision in the vector half of a hybrid search, and the
-    /// entries it swaps in are near-ties: measured on real library vectors, within about 1.5% of the
-    /// similarity of what they replace.
-    /// <para>
-    /// Turning it off needs a rebuild - Meilisearch discards the full vectors as it quantizes - but
-    /// that rebuild reads from the embedding cache, which always keeps full precision, so it
-    /// re-uploads rather than re-running the model.
-    /// </para>
+    /// On by default: 32 times smaller - a gigabyte down to tens of megabytes for 300k items - which
+    /// keeps vectors resident rather than paged in per query. The cost is some ranking precision, and
+    /// the entries it swaps in are near-ties, within about 1.5% of what they replace. Turning it off
+    /// needs a rebuild, but that reads full precision from the embedding cache rather than re-embeds.
     /// </remarks>
     public bool BinaryQuantizeVectors { get; set; }
 

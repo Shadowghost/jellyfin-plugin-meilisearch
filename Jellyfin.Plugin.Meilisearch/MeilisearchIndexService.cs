@@ -129,11 +129,10 @@ public class MeilisearchIndexService : IHostedService, IDisposable
         var workerToken = _workerCts.Token;
         _workerTask = Task.Run(() => RunWorkerAsync(workerToken), CancellationToken.None);
 
-        // Deliberately not awaited. Restoring resolves every persisted id through the library, which
-        // is up to ChannelCapacity database round-trips, and hosted services start before Jellyfin
-        // runs its startup tasks - so awaiting here would hold up the whole server and would do the
-        // lookups before the library's static dependencies are even wired up. Nothing observes the
-        // result until shutdown, so it swallows its own failures rather than faulting quietly.
+        // Deliberately not awaited: restoring resolves every persisted id through the library, up to
+        // ChannelCapacity round-trips, and hosted services start before Jellyfin's startup tasks - so
+        // awaiting would stall the server and run the lookups too early. Nothing observes the result
+        // until shutdown, hence swallowing its own failures.
         _restoreTask = Task.Run(
             async () =>
             {
@@ -568,11 +567,10 @@ public class MeilisearchIndexService : IHostedService, IDisposable
     /// <param name="path">The item's path, which may be null, empty or a virtual path.</param>
     /// <returns>The last path segment, or null when there is nothing to index.</returns>
     /// <remarks>
-    /// Directories are dropped rather than indexed. Every level above the item repeats the same words
-    /// across everything beneath it - a library root ("/mnt/media/Movies"), a metadata folder
-    /// ("People") - so indexing them would let a search for "movies" match a whole library. The leaf
-    /// is where the release name lives, which is the only part of a path a user searches for. Paths
-    /// beginning with <c>%</c> are Jellyfin's tokenized virtual paths and are skipped entirely.
+    /// Directories above the item repeat the same words across everything beneath them, so indexing
+    /// "/mnt/media/Movies" would let a search for "movies" match a whole library. The leaf holds the
+    /// release name, which is the part users search for. Jellyfin's <c>%</c> virtual paths are
+    /// skipped.
     /// </remarks>
     internal static string? GetSearchablePath(string? path)
     {
@@ -941,10 +939,9 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             }
         }
 
-        // Embed before pushing so a document and its vector land in the same Meilisearch task. The
-        // model may have been released for sitting idle, and this is a background flush, so it is
-        // worth the seconds to bring it back rather than indexing a document with no vector that
-        // nothing will revisit until the next full rebuild.
+        // Embed before pushing so a document and its vector land in the same Meilisearch task. This
+        // is a background flush, so reloading an idle-unloaded model is worth the seconds - the
+        // alternative is a vector-less document nothing revisits until the next rebuild.
         if (_embeddings.IsEnabled && docsToIndex.Count > 0)
         {
             await _embeddings.EnsureReadyAsync(null, cancellationToken).ConfigureAwait(false);

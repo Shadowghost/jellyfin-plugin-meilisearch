@@ -104,10 +104,6 @@ public class MeilisearchController : ControllerBase
     /// </summary>
     /// <response code="200">Models returned.</response>
     /// <returns>The available embedding models, in the order the settings page should list them.</returns>
-    /// <remarks>
-    /// Served rather than hard-coded into the settings page so adding a model stays a single change
-    /// in <see cref="EmbeddingModels"/>.
-    /// </remarks>
     [HttpGet("EmbeddingModels")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<IReadOnlyList<EmbeddingModelResponse>> GetEmbeddingModels()
@@ -164,10 +160,9 @@ public class MeilisearchController : ControllerBase
     /// <response code="200">Reconnect attempted; the payload describes the new state.</response>
     /// <returns>The connection state after reconnecting.</returns>
     /// <remarks>
-    /// Recreating the client rebuilds its <see cref="System.Net.Http.HttpClient"/>, which clears the
-    /// pooled connection and the cached DNS entry - the reason a recreated Meilisearch container is
-    /// reachable again without restarting Jellyfin. Transient failures already recover on their own;
-    /// this exists for the case where an admin has just fixed something and wants to see it now.
+    /// Rebuilding the <see cref="System.Net.Http.HttpClient"/> clears the pooled connection and the
+    /// cached DNS entry, which is what makes a recreated Meilisearch container reachable again.
+    /// Transient failures recover on their own; this is for seeing a fix take effect now.
     /// </remarks>
     [HttpPost("Reconnect")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -185,9 +180,8 @@ public class MeilisearchController : ControllerBase
     /// <response code="204">The reindex task was started.</response>
     /// <returns>No content.</returns>
     /// <remarks>
-    /// Queued through the task manager rather than run inline, so it survives this HTTP request and
-    /// reports progress on the Scheduled Tasks page. If the task is already running the request is a
-    /// no-op.
+    /// Queued through the task manager so it outlives this request and reports progress on the
+    /// Scheduled Tasks page. A no-op if the task is already running.
     /// </remarks>
     [HttpPost("Reindex")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
