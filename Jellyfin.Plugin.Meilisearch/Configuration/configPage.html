@@ -433,8 +433,18 @@
                 if (averageSearchTime === null || averageSearchTime === undefined) {
                     lines.push('<div><strong>Search time:</strong> no searches yet</div>');
                 } else {
-                    lines.push('<div><strong>Search time:</strong> ' + escapeHtml(Number(averageSearchTime).toFixed(1))
-                        + ' ms average over ' + escapeHtml(formatNumber(searchCount)) + ' searches</div>');
+                    var searchTimeLine = '<div><strong>Search time:</strong> '
+                        + escapeHtml(Number(averageSearchTime).toFixed(1))
+                        + ' ms average over ' + escapeHtml(formatNumber(searchCount)) + ' searches';
+
+                    // Embedding the query is usually the larger half, so it is worth naming rather
+                    // than leaving the total unexplained.
+                    var embedTime = pick(stats, 'EmbeddingQueryTimeMilliseconds');
+                    if (embedTime !== null && embedTime !== undefined) {
+                        searchTimeLine += ', of which ' + escapeHtml(Number(embedTime).toFixed(1))
+                            + ' ms embedding the query';
+                    }
+                    lines.push(searchTimeLine + '</div>');
                 }
 
                 var error = pick(stats, 'Error');
@@ -510,6 +520,18 @@
                             cacheLine += ', ' + escapeHtml((hitRate * 100).toFixed(1)) + '% reused this session';
                         }
                         lines.push(cacheLine + '</div>');
+                    }
+
+                    var queryHitRate = pick(stats, 'EmbeddingQueryCacheHitRate');
+                    if (queryHitRate !== null && queryHitRate !== undefined) {
+                        lines.push('<div><strong>Query vector cache:</strong> '
+                            + escapeHtml((queryHitRate * 100).toFixed(1)) + '% of searches reused a vector</div>');
+                    }
+
+                    if (pick(stats, 'SemanticRatioEffective') === false) {
+                        lines.push('<div><strong>Note:</strong> the semantic ratio is too low for meaning-based '
+                            + 'matching to affect results, so queries are not being embedded. Raise it above 70 '
+                            + 'to use semantic search.</div>');
                     }
 
                     var embeddingError = pick(stats, 'EmbeddingError');

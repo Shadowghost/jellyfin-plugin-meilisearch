@@ -89,6 +89,9 @@ public class MeilisearchController : ControllerBase
             EmbeddingCacheHitRate: _embeddings.CacheHitRate,
             EmbeddingExecutionProvider: _embeddings.ActiveExecutionProvider?.ToString(),
             EmbeddingAvailableProviders: _embeddings.IsEnabled ? _embeddings.AvailableExecutionProviders : null,
+            EmbeddingQueryTimeMilliseconds: _embeddings.AverageQueryEmbeddingMilliseconds,
+            EmbeddingQueryCacheHitRate: _embeddings.QueryVectorCacheHitRate,
+            SemanticRatioEffective: _embeddings.IsSemanticRatioEffective,
             MatchingStrategy: _client.EffectiveMatchingStrategy,
             AverageSearchTimeMilliseconds: _client.AverageSearchTimeMilliseconds,
             SearchCount: _client.SearchCount);

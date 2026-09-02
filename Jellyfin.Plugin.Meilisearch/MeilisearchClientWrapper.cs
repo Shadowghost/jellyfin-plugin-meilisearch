@@ -183,9 +183,7 @@ public class MeilisearchClientWrapper : IDisposable
                     ApplyScoreThreshold(searchParams, queryVector);
                     ApplyHybrid(searchParams, queryVector);
 
-                    var stopwatch = Stopwatch.StartNew();
                     var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
-                    RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
                     return results.Hits
                         .Select(hit => (hit.Id, hit.RankingScore ?? 0.0))
@@ -253,9 +251,7 @@ public class MeilisearchClientWrapper : IDisposable
                     ApplyScoreThreshold(searchParams, queryVector);
                     ApplyHybrid(searchParams, queryVector);
 
-                    var stopwatch = Stopwatch.StartNew();
                     var results = await index.SearchAsync<MeilisearchDocument>(searchTerm, searchParams, ct).ConfigureAwait(false);
-                    RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
                     return ApplyPerTypeQuota(results.Hits, distinctTypes.Length, totalLimit);
                 },
@@ -955,10 +951,11 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Folds a search round-trip into the rolling average reported by the status endpoint.
+    /// Records how long a search took end to end, for the rolling average the status endpoint
+    /// reports.
     /// </summary>
-    /// <param name="elapsedMilliseconds">The round-trip time of the search request.</param>
-    private void RecordSearchDuration(double elapsedMilliseconds)
+    /// <param name="elapsedMilliseconds">Elapsed time, including embedding the query.</param>
+    public void RecordSearchDuration(double elapsedMilliseconds)
     {
         lock (_metricsLock)
         {
