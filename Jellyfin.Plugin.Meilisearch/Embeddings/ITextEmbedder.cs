@@ -10,6 +10,13 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 public interface ITextEmbedder : IDisposable
 {
     /// <summary>
+    /// Gets the execution provider this embedder ended up running on, which is not necessarily the
+    /// one that was configured - a provider the loaded runtime lacks, or that will not initialize,
+    /// degrades to <see cref="EmbeddingExecutionProvider.Cpu"/>.
+    /// </summary>
+    EmbeddingExecutionProvider ExecutionProvider { get; }
+
+    /// <summary>
     /// Embeds a batch of texts.
     /// </summary>
     /// <param name="texts">The texts to embed.</param>

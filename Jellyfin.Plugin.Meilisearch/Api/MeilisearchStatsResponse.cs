@@ -22,6 +22,8 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="EmbeddingError">Optional error message from the last embedding initialization attempt.</param>
 /// <param name="EmbeddingCacheCount">Number of vectors held in the on-disk embedding cache, or null when it is not open.</param>
 /// <param name="EmbeddingCacheHitRate">Share of embedding lookups served from that cache since it was opened, 0.0-1.0, or null before the first lookup.</param>
+/// <param name="EmbeddingExecutionProvider">The execution provider inference is running on, or null when no model is loaded. What was negotiated with ONNX Runtime, not what was configured.</param>
+/// <param name="EmbeddingAvailableProviders">Every execution provider the loaded ONNX Runtime offers, so the settings page can say why a GPU choice did not take effect.</param>
 /// <param name="MatchingStrategy">The Meilisearch matching strategy queries are currently sent with.</param>
 /// <param name="AverageSearchTimeMilliseconds">Rolling average round-trip time of search requests, or null before the first search.</param>
 /// <param name="SearchCount">Number of search requests issued since startup.</param>
@@ -42,6 +44,8 @@ public sealed record MeilisearchStatsResponse(
     string? EmbeddingError,
     int? EmbeddingCacheCount,
     double? EmbeddingCacheHitRate,
+    string? EmbeddingExecutionProvider,
+    IReadOnlyCollection<string>? EmbeddingAvailableProviders,
     string MatchingStrategy,
     double? AverageSearchTimeMilliseconds,
     long SearchCount);

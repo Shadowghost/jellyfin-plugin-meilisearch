@@ -86,6 +86,19 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     public string? Error => _error;
 
     /// <summary>
+    /// Gets the execution provider inference is running on, or null when nothing is loaded. This is
+    /// what was actually negotiated with ONNX Runtime rather than what the configuration asked for.
+    /// </summary>
+    public EmbeddingExecutionProvider? ActiveExecutionProvider => _embedder?.ExecutionProvider;
+
+    /// <summary>
+    /// Gets the execution providers the loaded ONNX Runtime offers. On a stock install this is the
+    /// CPU provider alone, which is the answer to "why did selecting CUDA change nothing".
+    /// </summary>
+    public IReadOnlyCollection<string> AvailableExecutionProviders
+        => ExecutionProviderSelector.GetAvailableProviders(_logger);
+
+    /// <summary>
     /// Gets the keyword/vector balance to pass to Meilisearch, in the range 0.0-1.0.
     /// </summary>
     public double SemanticRatio => Math.Clamp(Configuration.SemanticRatio, 0, 100) / 100d;
@@ -691,6 +704,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             descriptor.Definition.Id,
             descriptor.Directory,
             Configuration.EmbeddingThreads.ToString(CultureInfo.InvariantCulture),
+            Configuration.EmbeddingOnnxRuntimePath,
             Configuration.EnableEmbeddingCache ? "cache" : "nocache",
             Configuration.EmbeddingCacheMaxEntries.ToString(CultureInfo.InvariantCulture));
 

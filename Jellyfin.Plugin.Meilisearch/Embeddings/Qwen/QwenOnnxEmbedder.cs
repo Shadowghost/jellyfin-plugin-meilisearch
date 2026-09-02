@@ -40,6 +40,7 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     private readonly SessionOptions _sessionOptions;
     private readonly string[] _pastKeyValueNames;
     private readonly TensorElementType _pastKeyValueType;
+    private readonly EmbeddingExecutionProvider _provider;
 #pragma warning disable CA2213 // Deliberately not disposed; see the remarks on Dispose.
     private readonly SemaphoreSlim _inferenceLock = new(1, 1);
 #pragma warning restore CA2213
@@ -51,13 +52,15 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
         QwenEmbeddingTokenizer tokenizer,
         int dimensions,
         InferenceSession session,
-        SessionOptions sessionOptions)
+        SessionOptions sessionOptions,
+        EmbeddingExecutionProvider provider)
     {
         _logger = logger;
         _tokenizer = tokenizer;
         _dimensions = dimensions;
         _session = session;
         _sessionOptions = sessionOptions;
+        _provider = provider;
 
         _pastKeyValueNames = [.. session.InputMetadata.Keys
             .Where(static name => name.StartsWith(PastKeyValuePrefix, StringComparison.Ordinal))];
@@ -69,11 +72,14 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             : TensorElementType.Float;
     }
 
+    /// <inheritdoc />
+    public EmbeddingExecutionProvider ExecutionProvider => _provider;
+
     /// <summary>
     /// Loads the model and tokenizer from disk.
     /// </summary>
     /// <param name="descriptor">The model to load.</param>
-    /// <param name="threads">Number of inference threads, or zero to pick a default.</param>
+    /// <param name="threads">Number of inference threads, or zero to pick a default. CPU only.</param>
     /// <param name="logger">The logger.</param>
     /// <returns>The loaded embedder.</returns>
     public static QwenOnnxEmbedder Load(EmbeddingModelDescriptor descriptor, int threads, ILogger logger)
@@ -81,12 +87,13 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
         ArgumentNullException.ThrowIfNull(descriptor);
         ArgumentNullException.ThrowIfNull(logger);
 
-        // Must happen before the first ONNX Runtime P/Invoke, i.e. before InferenceSession below.
+        // Must happen before the first ONNX Runtime P/Invoke, i.e. before the provider query and the
+        // InferenceSession below.
         OnnxRuntimeNativeLoader.EnsureRegistered(logger);
 
         var tokenizer = QwenEmbeddingTokenizer.Load(descriptor);
 
-        // Default to half the processors: inference is CPU-bound and Jellyfin still has to serve
+        // Default to half the processors: CPU inference still has to leave Jellyfin room to serve
         // playback and transcodes while a reindex is embedding the library.
         var intraOpThreads = threads > 0 ? threads : Math.Max(1, Environment.ProcessorCount / 2);
 
@@ -97,12 +104,20 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
 
-        // The weights are the bulk of what a loaded session holds - hundreds of megabytes - and by
-        // default they come out of the same arena the per-pass activations do. The arena only ever
-        // grows, so leaving them in it means every later measurement of "how big did inference get"
-        // is really the weights plus inference, and the two can never be told apart or released
-        // separately. Allocated directly, the arena is left sized for activations alone.
-        sessionOptions.AddSessionConfigEntry("session.use_device_allocator_for_initializers", "1");
+        EmbeddingExecutionProvider provider;
+        try
+        {
+            provider = ExecutionProviderSelector.Apply(sessionOptions, logger);
+
+            // The weights are the bulk of what a loaded session holds - hundreds of megabytes - and by
+            // default they come out of the same arena the per-pass activations do.
+            sessionOptions.AddSessionConfigEntry("session.use_device_allocator_for_initializers", "1");
+        }
+        catch
+        {
+            sessionOptions.Dispose();
+            throw;
+        }
 
         InferenceSession session;
         try
@@ -115,13 +130,30 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             throw;
         }
 
-        logger.LogInformation(
-            "Loaded embedding model {Model} ({Dimensions} dimensions, {Threads} threads)",
-            descriptor.Definition.DisplayName,
-            descriptor.Definition.Dimensions,
-            intraOpThreads.ToString(CultureInfo.InvariantCulture));
+        if (provider == EmbeddingExecutionProvider.Cpu)
+        {
+            logger.LogInformation(
+                "Loaded embedding model {Model} ({Dimensions} dimensions) on the CPU with {Threads} threads",
+                descriptor.Definition.DisplayName,
+                descriptor.Definition.Dimensions,
+                intraOpThreads.ToString(CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            logger.LogInformation(
+                "Loaded embedding model {Model} ({Dimensions} dimensions) on {Provider}",
+                descriptor.Definition.DisplayName,
+                descriptor.Definition.Dimensions,
+                provider);
+        }
 
-        return new QwenOnnxEmbedder(logger, tokenizer, descriptor.Definition.Dimensions, session, sessionOptions);
+        return new QwenOnnxEmbedder(
+            logger,
+            tokenizer,
+            descriptor.Definition.Dimensions,
+            session,
+            sessionOptions,
+            provider);
     }
 
     /// <summary>
@@ -248,7 +280,15 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             // for the life of the server, which is memory a media server would rather spend on
             // playback. Returning it costs an allocation cycle per pass, against twenty-eight
             // transformer layers of work in the same pass.
-            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
+            //
+            // Only on the CPU. A GPU provider allocates and frees through its own device arena, where
+            // the same round trip is a device synchronization on every pass - it would cost more than
+            // the inference it wraps, and the idle unload already gives the memory back by releasing
+            // the whole session.
+            if (_provider == EmbeddingExecutionProvider.Cpu)
+            {
+                runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
+            }
 
             using var outputs = _session.Run(runOptions, names, values, [HiddenStateOutput]);
 

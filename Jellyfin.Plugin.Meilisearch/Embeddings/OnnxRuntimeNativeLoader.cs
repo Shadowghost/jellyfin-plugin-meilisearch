@@ -145,14 +145,20 @@ internal static class OnnxRuntimeNativeLoader
 
     private static IEnumerable<string> GetCandidatePaths()
     {
-        var pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        if (string.IsNullOrEmpty(pluginDirectory))
+        var fileName = GetNativeFileName();
+        if (fileName is null)
         {
             yield break;
         }
 
-        var fileName = GetNativeFileName();
-        if (fileName is null)
+        // An explicitly configured library wins over everything, including the bundled one.
+        foreach (var configured in GetConfiguredPaths(fileName))
+        {
+            yield return configured;
+        }
+
+        var pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        if (string.IsNullOrEmpty(pluginDirectory))
         {
             yield break;
         }
@@ -171,6 +177,36 @@ internal static class OnnxRuntimeNativeLoader
             // NuGet's own layout, for an install assembled straight from the build output.
             yield return Path.Combine(pluginDirectory, "runtimes", rid, "native", fileName);
         }
+    }
+
+    private static IEnumerable<string> GetConfiguredPaths(string fileName)
+    {
+        string? configured;
+        try
+        {
+            configured = Plugin.Instance?.Configuration.EmbeddingOnnxRuntimePath;
+        }
+#pragma warning disable CA1031 // Resolution runs before the plugin is necessarily reachable.
+        catch (Exception)
+        {
+            yield break;
+        }
+#pragma warning restore CA1031
+
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            yield break;
+        }
+
+        configured = configured.Trim();
+
+        if (Directory.Exists(configured))
+        {
+            yield return Path.Combine(configured, fileName);
+            yield break;
+        }
+
+        yield return configured;
     }
 
     private static string? GetNativeFileName()
