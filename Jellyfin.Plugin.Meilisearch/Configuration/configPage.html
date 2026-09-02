@@ -115,7 +115,12 @@
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="semanticRatio" min="0" max="100" step="1" label="Semantic Ratio (0-100)" />
-                        <div class="fieldDescription">0 is pure keyword search, 100 is pure meaning. Default: 50</div>
+                        <div class="fieldDescription">
+                            0 is pure keyword search, 100 is pure meaning. Meilisearch picks one side per result rather
+                            than blending them, and a keyword match almost always outscores a vector one, so
+                            <strong>below 70 the vector cannot change the ranking at all</strong> &mdash; queries are not
+                            embedded there, which also saves the CPU it would cost. Default: 75
+                        </div>
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
@@ -575,7 +580,7 @@
                         }
 
                         document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
-                        setNumericInput('#semanticRatio', config.SemanticRatio, 50);
+                        setNumericInput('#semanticRatio', config.SemanticRatio, 75);
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
                         document.querySelector('#embeddingOnnxRuntimePath').value =
@@ -619,7 +624,7 @@
                             config.EmbeddingModelId = selectedModel;
                         }
                         config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
-                        config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 50);
+                        config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 75);
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
                         config.EmbeddingOnnxRuntimePath = document.querySelector('#embeddingOnnxRuntimePath').value;

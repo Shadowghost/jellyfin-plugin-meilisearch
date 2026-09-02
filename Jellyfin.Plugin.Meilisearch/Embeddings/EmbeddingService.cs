@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -20,15 +21,35 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// </summary>
 public sealed class EmbeddingService : IHostedService, IDisposable
 {
+    /// <summary>
+    /// The lowest <see cref="PluginConfiguration.SemanticRatio"/> at which a query vector can still
+    /// change what Meilisearch returns.
+    /// </summary>
+    /// <remarks>
+    /// Hybrid search picks per hit rather than blending: the larger of
+    /// <c>keywordScore * (1 - ratio)</c> and <c>semanticScore * ratio</c> wins. Keyword hits score
+    /// about 1.0 and vector matches about 0.4, so the semantic side only wins above roughly 0.71.
+    /// Re-derive this if <see cref="EmbeddingModelDefinition.EmbeddingRevision"/> changes, since it
+    /// depends on the score scale.
+    /// </remarks>
+    public const int MinEffectiveSemanticRatio = 70;
+
     // Texts handed to the embedder per call. Each gets its own forward pass regardless, so this only
     // sets how often a long run checks for cancellation and reports progress - about twice a second.
     private const int EmbedChunkSize = 8;
+
+    private const int QueryVectorCacheSize = 64;
+    private const double QueryEmbeddingSmoothingFactor = 0.2;
 
     private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMinutes(1);
 
     private readonly ILogger<EmbeddingService> _logger;
     private readonly IApplicationPaths _applicationPaths;
     private readonly SemaphoreSlim _initLock = new(1, 1);
+
+    private readonly object _queryVectorGate = new();
+    private readonly Dictionary<string, LinkedListNode<QueryVector>> _queryVectors = new(StringComparer.Ordinal);
+    private readonly LinkedList<QueryVector> _queryVectorOrder = new();
 
     private long _lastUseTicks = DateTime.UtcNow.Ticks;
 
@@ -41,6 +62,11 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     private Task? _backgroundInit;
     private CancellationTokenSource? _cts;
     private EventHandler<BasePluginConfiguration>? _configurationChangedHandler;
+    private long _queryVectorHits;
+    private long _queryVectorMisses;
+    private long _queryEmbeddingCount;
+    private double _averageQueryEmbeddingMilliseconds;
+    private bool _warnedSemanticRatio;
     private bool _disposed;
 
     /// <summary>
@@ -129,6 +155,42 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return total == 0 ? null : (double)cache.Hits / total;
         }
     }
+
+    /// <summary>
+    /// Gets the rolling average time spent embedding a query, or null before the first one.
+    /// </summary>
+    public double? AverageQueryEmbeddingMilliseconds
+    {
+        get
+        {
+            lock (_queryVectorGate)
+            {
+                return _queryEmbeddingCount == 0 ? null : _averageQueryEmbeddingMilliseconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the share of query embeddings served from the in-memory query cache, 0.0-1.0, or null
+    /// before the first query.
+    /// </summary>
+    public double? QueryVectorCacheHitRate
+    {
+        get
+        {
+            lock (_queryVectorGate)
+            {
+                var total = _queryVectorHits + _queryVectorMisses;
+                return total == 0 ? null : (double)_queryVectorHits / total;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether the configured semantic ratio is high enough for a query
+    /// vector to affect the ranking. See <see cref="MinEffectiveSemanticRatio"/>.
+    /// </summary>
+    public bool IsSemanticRatioEffective => Configuration.SemanticRatio >= MinEffectiveSemanticRatio;
 
     private static PluginConfiguration Configuration => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
@@ -397,7 +459,28 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return null;
         }
 
+        if (!IsEnabled)
+        {
+            return null;
+        }
+
+        // Before the model is touched: below the crossover the vector cannot change the ranking, so
+        // the forward pass would be tens of milliseconds spent on a number Meilisearch discards.
+        if (Configuration.SemanticRatio < MinEffectiveSemanticRatio)
+        {
+            WarnSemanticRatioIneffective();
+            return null;
+        }
+
         MarkUsed();
+
+        var queryPrompt = ActiveModel.QueryPrompt;
+        var prompt = queryPrompt.Length == 0 ? searchTerm : queryPrompt + " " + searchTerm;
+
+        if (TryGetCachedQueryVector(prompt) is { } cached)
+        {
+            return cached;
+        }
 
         if (!IsReady)
         {
@@ -408,9 +491,10 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return null;
         }
 
-        var queryPrompt = ActiveModel.QueryPrompt;
-        var prompt = queryPrompt.Length == 0 ? searchTerm : queryPrompt + " " + searchTerm;
+        var stopwatch = Stopwatch.StartNew();
         var vectors = EmbedInternal([prompt], EmbeddingPriority.Interactive, cancellationToken);
+        RecordQueryEmbedding(stopwatch.Elapsed.TotalMilliseconds);
+
         if (vectors.Count == 0 || vectors[0] is not { Length: > 0 } vector)
         {
             return null;
@@ -422,7 +506,96 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             result[i] = vector[i];
         }
 
+        StoreQueryVector(prompt, result);
         return result;
+    }
+
+    /// <summary>
+    /// Looks up a query vector computed for an earlier search.
+    /// </summary>
+    /// <param name="prompt">The prompted query text, exactly as it would be embedded.</param>
+    /// <returns>A copy of the cached vector, or null when it is not cached.</returns>
+    private double[]? TryGetCachedQueryVector(string prompt)
+    {
+        lock (_queryVectorGate)
+        {
+            if (!_queryVectors.TryGetValue(prompt, out var node))
+            {
+                _queryVectorMisses++;
+                return null;
+            }
+
+            _queryVectorOrder.Remove(node);
+            _queryVectorOrder.AddFirst(node);
+            _queryVectorHits++;
+
+            // Copied: callers own what they get, and concurrent searches must not share an array.
+            return (double[])node.Value.Vector.Clone();
+        }
+    }
+
+    private void StoreQueryVector(string prompt, double[] vector)
+    {
+        lock (_queryVectorGate)
+        {
+            if (_queryVectors.ContainsKey(prompt))
+            {
+                return;
+            }
+
+            var node = _queryVectorOrder.AddFirst(new QueryVector(prompt, (double[])vector.Clone()));
+            _queryVectors[prompt] = node;
+
+            while (_queryVectors.Count > QueryVectorCacheSize && _queryVectorOrder.Last is { } oldest)
+            {
+                _queryVectorOrder.RemoveLast();
+                _queryVectors.Remove(oldest.Value.Prompt);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops every cached query vector, since vectors from one model mean nothing to another.
+    /// </summary>
+    private void ClearQueryVectors()
+    {
+        lock (_queryVectorGate)
+        {
+            _queryVectors.Clear();
+            _queryVectorOrder.Clear();
+        }
+    }
+
+    private void RecordQueryEmbedding(double elapsedMilliseconds)
+    {
+        lock (_queryVectorGate)
+        {
+            _averageQueryEmbeddingMilliseconds = _queryEmbeddingCount == 0
+                ? elapsedMilliseconds
+                : (QueryEmbeddingSmoothingFactor * elapsedMilliseconds)
+                    + ((1 - QueryEmbeddingSmoothingFactor) * _averageQueryEmbeddingMilliseconds);
+            _queryEmbeddingCount++;
+        }
+    }
+
+    private void WarnSemanticRatioIneffective()
+    {
+        lock (_queryVectorGate)
+        {
+            if (_warnedSemanticRatio)
+            {
+                return;
+            }
+
+            _warnedSemanticRatio = true;
+        }
+
+        _logger.LogInformation(
+            "Semantic search is enabled but the semantic ratio is {Ratio}, below the {Minimum} at which a "
+            + "vector can outrank a keyword match, so queries are not being embedded. Raise the ratio to use "
+            + "it, or turn semantic search off to stop loading the model",
+            Configuration.SemanticRatio.ToString(CultureInfo.InvariantCulture),
+            MinEffectiveSemanticRatio.ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>
@@ -851,6 +1024,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         _cache = null;
         _loadedKey = null;
 
+        ClearQueryVectors();
+
         // Disposing the embedder blocks until any forward pass already running has finished, so the
         // cache outlives every call that could still want to write to it.
         embedder?.Dispose();
@@ -873,4 +1048,9 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         _cts = null;
         _initLock.Dispose();
     }
+
+    /// <summary>
+    /// One cached query vector, keyed by the prompted text that produced it.
+    /// </summary>
+    private readonly record struct QueryVector(string Prompt, double[] Vector);
 }
