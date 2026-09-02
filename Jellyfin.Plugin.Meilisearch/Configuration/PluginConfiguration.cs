@@ -49,7 +49,7 @@ public class PluginConfiguration : BasePluginConfiguration
         IndexedEmbeddingModelId = string.Empty;
         AutoDownloadEmbeddingModel = true;
         EmbeddingModelPath = string.Empty;
-        SemanticRatio = 50;
+        SemanticRatio = 75;
         EmbeddingMaxTokens = 256;
         EmbeddingThreads = 0;
         EmbeddingOnnxRuntimePath = string.Empty;
@@ -203,6 +203,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the balance between keyword and vector matching, 0-100. Zero is pure keyword
     /// search, 100 is pure vector search.
     /// </summary>
+    /// <remarks>
+    /// Below <see cref="EmbeddingService.MinEffectiveSemanticRatio"/> a vector cannot change the
+    /// ranking, so queries are not embedded at all. See the remarks there.
+    /// </remarks>
     public int SemanticRatio { get; set; }
 
     /// <summary>
