@@ -97,13 +97,13 @@ public class MeilisearchClientWrapper : IDisposable
     public bool IsConfigured => !string.IsNullOrWhiteSpace(Configuration.MeilisearchUrl);
 
     /// <summary>
-    /// Gets the rolling average round-trip time of the Meilisearch search requests issued since
-    /// startup, in milliseconds, or null when no search has run yet.
+    /// Gets the rolling average time a search takes end to end, in milliseconds, or null when no
+    /// search has run yet.
     /// </summary>
     /// <remarks>
     /// An exponential moving average weighted by <see cref="SearchTimeSmoothingFactor"/>, so it
-    /// tracks current behaviour rather than accumulating history. Measures only the HTTP call to
-    /// Meilisearch, not the time Jellyfin then spends loading and access-filtering items.
+    /// tracks current behaviour rather than accumulating history. Covers embedding the query and the
+    /// Meilisearch call, but not the time Jellyfin then spends loading and access-filtering items.
     /// </remarks>
     public double? AverageSearchTimeMilliseconds
     {
@@ -1142,14 +1142,14 @@ public class MeilisearchClientWrapper : IDisposable
             "|",
             config.IndexName ?? string.Empty,
             "|",
+            config.EnableSemanticSearch ? "vec:" + EmbeddingModels.Resolve(config.EmbeddingModelId).Id : "novec",
+            "|",
+            config.BinaryQuantizeVectors ? "bq" : "f32",
+            "|",
             // In the key so toggling either reapplies the index settings; otherwise the change would
             // never reach Meilisearch.
             config.SearchOverviews ? "ov" : "noov",
-            config.SearchFilePaths ? "path" : "nopath",
-            "|",
-            config.EnableSemanticSearch ? "vec:" + EmbeddingModels.Resolve(config.EmbeddingModelId).Id : "novec",
-            "|",
-            config.BinaryQuantizeVectors ? "bq" : "f32");
+            config.SearchFilePaths ? "path" : "nopath");
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -1396,10 +1396,9 @@ public class MeilisearchClientWrapper : IDisposable
     /// Registers or removes the vector field depending on whether semantic search is enabled.
     /// </summary>
     /// <remarks>
-    /// Registered as <c>userProvided</c>: the plugin runs the model locally and ships the vectors with
-    /// each document, so Meilisearch never needs an embedding service of its own or network access to
-    /// one. Removing the embedder when semantic search is turned off also drops the stored vectors,
-    /// which is what reclaims the index space.
+    /// Registered as <c>userProvided</c>: the plugin embeds locally and ships vectors with each
+    /// document, so Meilisearch needs no embedding service or network access of its own. Removing the
+    /// embedder also drops the stored vectors, which is what reclaims the space.
     /// </remarks>
     private async Task ConfigureEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
     {
@@ -1454,11 +1453,9 @@ public class MeilisearchClientWrapper : IDisposable
     /// Drops embedders left behind by a different embedding model.
     /// </summary>
     /// <remarks>
-    /// Each model registers under its own embedder name, so switching models leaves the previous
-    /// one's registration - and its vectors - in the index. Meilisearch would keep serving them, and
-    /// a hybrid search naming the new embedder would silently ignore every document that only has
-    /// old vectors. Dropping them makes the index consistently vector-less until the rebuild that a
-    /// model switch requires anyway.
+    /// Switching models otherwise leaves the old registration and its vectors in the index, where a
+    /// hybrid search naming the new embedder would silently skip every document that only has old
+    /// ones. Dropping them leaves the index consistently vector-less until the rebuild.
     /// </remarks>
     private async Task RemoveStaleEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
     {

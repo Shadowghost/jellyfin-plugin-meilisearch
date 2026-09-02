@@ -15,19 +15,13 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// plugin.
 /// </summary>
 /// <remarks>
-/// The RID-based <c>runtimes/{rid}/native</c> probing that works in a normal application is driven by
-/// the host application's <c>.deps.json</c>. A plugin is loaded into its own context and contributes
-/// nothing to that file, so the default <c>DllImport</c> resolution never looks inside the plugin's
-/// own directory and the P/Invoke fails with a bare "unable to load onnxruntime". Registering a
-/// resolver removes the guesswork.
-/// <para>
-/// The packaged layout is <c>native/{rid}/</c> rather than NuGet's <c>runtimes/{rid}/native/</c>, and
-/// the Windows libraries are staged as <c>.nativelib</c>. That is deliberate: Jellyfin discovers
-/// plugin assemblies by globbing <c>*.dll</c> through every subdirectory and calling
-/// <c>LoadFromAssemblyPath</c> on each result, which throws on a native Windows DLL and disables the
-/// whole plugin. Loading by full path here does not care about the extension. NuGet's layout is still
-/// probed so an install assembled straight from the build output keeps working.
-/// </para>
+/// RID-based <c>runtimes/{rid}/native</c> probing is driven by the host's <c>.deps.json</c>, which a
+/// plugin contributes nothing to, so <c>DllImport</c> never looks in the plugin's own directory and
+/// the P/Invoke fails with a bare "unable to load onnxruntime". The packaged layout is
+/// <c>native/{rid}/</c> with Windows libraries staged as <c>.nativelib</c>, because Jellyfin globs
+/// <c>*.dll</c> through every subdirectory and calls <c>LoadFromAssemblyPath</c> on each, which
+/// throws on a native Windows DLL and disables the plugin; loading by full path ignores the
+/// extension. NuGet's layout is still probed so a build-output install keeps working.
 /// </remarks>
 internal static class OnnxRuntimeNativeLoader
 {

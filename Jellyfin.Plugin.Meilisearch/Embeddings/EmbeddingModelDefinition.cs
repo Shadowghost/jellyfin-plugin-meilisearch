@@ -12,12 +12,9 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// shape of vector it produces, and how to load it.
 /// </summary>
 /// <remarks>
-/// A definition is not a way to point the plugin at an arbitrary repository. Tokenization, the graph
-/// inputs and the pooling are specific to a model family and live in an <see cref="ITextEmbedder"/>
-/// implementation, so a definition only ever describes a model this plugin has code for - which is
-/// why <see cref="EmbeddingModels"/> is a fixed list rather than user input. Pointing an existing
-/// definition at a different repository would not produce a different model, it would produce
-/// quietly wrong vectors - right shape, right norm, wrong meaning - or a load failure.
+/// Not a way to point the plugin at an arbitrary repository: tokenization, graph inputs and pooling
+/// live in an <see cref="ITextEmbedder"/> implementation, so a definition only describes a model this
+/// build has code for. Repointing one produces quietly wrong vectors, not a different model.
 /// </remarks>
 /// <param name="Id">
 /// The stable identifier stored in the configuration. It also names the model's directory on disk

@@ -157,7 +157,7 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     }
 
     /// <summary>
-    /// Embeds a batch of texts in a single forward pass.
+    /// Embeds texts, one forward pass each.
     /// </summary>
     /// <param name="texts">The texts to embed.</param>
     /// <param name="maxTokens">Maximum tokens to keep per text.</param>

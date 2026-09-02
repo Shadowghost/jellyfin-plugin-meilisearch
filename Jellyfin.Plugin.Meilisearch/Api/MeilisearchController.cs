@@ -104,10 +104,6 @@ public class MeilisearchController : ControllerBase
     /// </summary>
     /// <response code="200">Models returned.</response>
     /// <returns>The available embedding models, in the order the settings page should list them.</returns>
-    /// <remarks>
-    /// Served rather than hard-coded into the settings page so adding a model stays a single change
-    /// in <see cref="EmbeddingModels"/>.
-    /// </remarks>
     [HttpGet("EmbeddingModels")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<IReadOnlyList<EmbeddingModelResponse>> GetEmbeddingModels()
