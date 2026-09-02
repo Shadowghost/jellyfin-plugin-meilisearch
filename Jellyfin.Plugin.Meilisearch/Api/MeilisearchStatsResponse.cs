@@ -24,8 +24,11 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="EmbeddingCacheHitRate">Share of embedding lookups served from that cache since it was opened, 0.0-1.0, or null before the first lookup.</param>
 /// <param name="EmbeddingExecutionProvider">The execution provider inference is running on, or null when no model is loaded. What was negotiated with ONNX Runtime, not what was configured.</param>
 /// <param name="EmbeddingAvailableProviders">Every execution provider the loaded ONNX Runtime offers, so the settings page can say why a GPU choice did not take effect.</param>
+/// <param name="EmbeddingQueryTimeMilliseconds">Rolling average time spent embedding a search query, or null before the first one. Part of, not additional to, <paramref name="AverageSearchTimeMilliseconds"/>.</param>
+/// <param name="EmbeddingQueryCacheHitRate">Share of query embeddings served from the in-memory query vector cache, 0.0-1.0, or null before the first query.</param>
+/// <param name="SemanticRatioEffective">Whether the configured semantic ratio is high enough for a query vector to affect the ranking. When false, queries are not embedded at all.</param>
 /// <param name="MatchingStrategy">The Meilisearch matching strategy queries are currently sent with.</param>
-/// <param name="AverageSearchTimeMilliseconds">Rolling average round-trip time of search requests, or null before the first search.</param>
+/// <param name="AverageSearchTimeMilliseconds">Rolling average time of a whole search, embedding included, or null before the first search.</param>
 /// <param name="SearchCount">Number of search requests issued since startup.</param>
 public sealed record MeilisearchStatsResponse(
     long? DocumentCount,
@@ -46,6 +49,9 @@ public sealed record MeilisearchStatsResponse(
     double? EmbeddingCacheHitRate,
     string? EmbeddingExecutionProvider,
     IReadOnlyCollection<string>? EmbeddingAvailableProviders,
+    double? EmbeddingQueryTimeMilliseconds,
+    double? EmbeddingQueryCacheHitRate,
+    bool SemanticRatioEffective,
     string MatchingStrategy,
     double? AverageSearchTimeMilliseconds,
     long SearchCount);

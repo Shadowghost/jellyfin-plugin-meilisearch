@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -63,9 +64,13 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
         var effectiveTypes = query.IncludeItemTypes;
         var nonTypeFilter = BuildNonTypeFilter(query);
 
-        // Null unless semantic search is enabled and the model is already loaded. Embedding a query
-        // costs a forward pass, so this deliberately never waits for a load or a download - a search
-        // issued before the model is ready simply runs as keyword-only.
+        // Timed from here, not around the Meilisearch call: embedding the query is the larger half
+        // of a search, and leaving it out made the reported time look fine while the user waited.
+        var stopwatch = Stopwatch.StartNew();
+
+        // Null unless semantic search is on, the ratio is high enough for a vector to matter, and
+        // the model is loaded. This never waits for a load or a download - a search issued before
+        // the model is ready runs keyword-only.
         var queryVector = _embeddings.EmbedQuery(query.SearchTerm, cancellationToken);
 
         IReadOnlyList<(string Id, double Score)> results;
@@ -106,6 +111,8 @@ public class MeilisearchSearchProvider : IExternalSearchProvider
             _logger.LogError(ex, "Error searching Meilisearch for term '{SearchTerm}'", query.SearchTerm);
             yield break;
         }
+
+        _client.RecordSearchDuration(stopwatch.Elapsed.TotalMilliseconds);
 
         foreach (var (id, score) in results)
         {
