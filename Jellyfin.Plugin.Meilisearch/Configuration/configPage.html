@@ -31,7 +31,30 @@
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="minimumMatchScore" min="0" max="100" step="1" label="Minimum Match Score (0-100)" />
-                        <div class="fieldDescription">Results with a match score below this threshold will be filtered out. Set to 0 to include all results. Default: 50</div>
+                        <div class="fieldDescription">
+                            Results scoring below this are dropped. Note that a keyword match on a whole word scores
+                            96 or above whichever field it matched, so anything from 0 to 95 behaves the same and 100
+                            means exact matches only. To make searches narrower, use the two options below instead.
+                            Default: 50
+                        </div>
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="searchOverviews" />
+                        <span>Search plot summaries</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Overviews are long, so they match far more often than titles: on a 334,000 item library the word
+                        &ldquo;from&rdquo; matched 1,234 titles and 36,707 overviews. Title matches still rank above them,
+                        so leave this on unless searches feel padded with loosely related items.
+                    </div>
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="searchFilePaths" />
+                        <span>Search file paths</span>
+                    </label>
+                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                        Makes items findable by release name. Worth turning off if searches feel padded: a path
+                        carries every directory above the file too, so a library at <em>/media/from-nas</em> makes
+                        everything in it match &ldquo;from&rdquo;.
                     </div>
                     <div class="selectContainer">
                         <select is="emby-select" id="matchingStrategy" label="Matching Strategy">
@@ -562,6 +585,9 @@
 
                         document.querySelector('#matchingStrategy').value = config.MatchingStrategy || 'frequency';
 
+                        document.querySelector('#searchOverviews').checked = config.SearchOverviews !== false;
+                        document.querySelector('#searchFilePaths').checked = config.SearchFilePaths !== false;
+
                         var minScoreInput = document.querySelector('#minimumMatchScore');
                         minScoreInput.value = (config.MinimumMatchScore !== null && config.MinimumMatchScore !== undefined) ? config.MinimumMatchScore : 50;
                         minScoreInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
@@ -620,6 +646,8 @@
                         config.EnableRealTimeSync = document.querySelector('#enableRealTimeSync').checked;
                         config.MinimumMatchScore = parseIntOrDefault(document.querySelector('#minimumMatchScore').value, 50);
                         config.MatchingStrategy = document.querySelector('#matchingStrategy').value || 'frequency';
+                        config.SearchOverviews = document.querySelector('#searchOverviews').checked;
+                        config.SearchFilePaths = document.querySelector('#searchFilePaths').checked;
                         config.SyncBatchSize = parseIntOrDefault(document.querySelector('#syncBatchSize').value, 500);
                         config.SyncBatchDebounceMilliseconds = parseIntOrDefault(document.querySelector('#syncBatchDebounceMilliseconds').value, 2000);
                         config.ReindexBatchSize = parseIntOrDefault(document.querySelector('#reindexBatchSize').value, 2000);

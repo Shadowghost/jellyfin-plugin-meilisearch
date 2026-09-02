@@ -32,6 +32,8 @@ public class PluginConfiguration : BasePluginConfiguration
         IndexName = "jellyfin";
         EnableRealTimeSync = true;
         MinimumMatchScore = 50;
+        SearchOverviews = true;
+        SearchFilePaths = true;
         MatchingStrategy = DefaultMatchingStrategy;
         SyncBatchSize = 500;
         SyncBatchDebounceMilliseconds = 2000;
@@ -83,6 +85,18 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Results with a score below this threshold will be filtered out.
     /// </summary>
     public int? MinimumMatchScore { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether plot summaries are searched by keyword.
+    /// </summary>
+    public bool SearchOverviews { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether file paths are searched by keyword. On by default,
+    /// since it is what makes items findable by release name; worth turning off if searches feel
+    /// padded, because a path carries the name of every directory above the file too.
+    /// </summary>
+    public bool SearchFilePaths { get; set; }
 
     /// <summary>
     /// Gets or sets the Meilisearch matching strategy: <c>frequency</c>, <c>last</c> or <c>all</c>.
