@@ -957,15 +957,62 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Builds a cache key composed of the URL, API key and index name.
+    /// The attributes keyword search looks at, ordered by priority, high to low.
     /// </summary>
+    /// <remarks>
+    /// Order matters: the <c>attribute</c> ranking rule is what keeps a title match above one buried
+    /// in the plot, so the long free-text fields come last.
+    /// </remarks>
+    private static List<string> BuildSearchableAttributes(PluginConfiguration config)
+    {
+        var attributes = new List<string>(20)
+        {
+            "name",
+            "originalTitle",
+            "sortName",
+            "seriesName",
+            "seasonName",
+            "albumName",
+            "artists",
+            "albumArtists",
+            "people",
+            "genres",
+            "tags",
+            "studios",
+            "providerIds.Imdb",
+            "providerIds.Tmdb",
+            "providerIds.Tvdb",
+            "productionLocations",
+            "tagline"
+        };
+
+        if (config.SearchOverviews)
+        {
+            attributes.Add("overview");
+        }
+
+        // Lowest priority on purpose: a file-name match should never outrank a title or a plot
+        // match, it only has to make the item findable by its release name.
+        if (config.SearchFilePaths)
+        {
+            attributes.Add("path");
+        }
+
+        return attributes;
+    }
+
     private static string BuildCacheKey(PluginConfiguration config)
         => string.Concat(
             config.MeilisearchUrl ?? string.Empty,
             "|",
             config.ApiKey ?? string.Empty,
             "|",
-            config.IndexName ?? string.Empty);
+            config.IndexName ?? string.Empty,
+            "|",
+            // In the key so toggling either reapplies the index settings; otherwise the change would
+            // never reach Meilisearch.
+            config.SearchOverviews ? "ov" : "noov",
+            config.SearchFilePaths ? "path" : "nopath");
 
     /// <summary>
     /// Invalidates the cached index handle and the applied-settings marker.
@@ -1076,32 +1123,8 @@ public class MeilisearchClientWrapper : IDisposable
             _logger.LogDebug("Applying Meilisearch index settings");
         }
 
-        // Configure searchable attributes (ordered by priority, high to low).
         await index.UpdateSearchableAttributesAsync(
-            [
-                "name",
-                "originalTitle",
-                "sortName",
-                "seriesName",
-                "seasonName",
-                "albumName",
-                "artists",
-                "albumArtists",
-                "people",
-                "genres",
-                "tags",
-                "studios",
-                "providerIds.Imdb",
-                "providerIds.Tmdb",
-                "providerIds.Tvdb",
-                "productionLocations",
-                "tagline",
-                "overview",
-
-                // Lowest priority on purpose: a file-name match should never outrank a title or a
-                // plot match, it only has to make the item findable by its release name.
-                "path"
-            ],
+            BuildSearchableAttributes(Configuration),
             cancellationToken).ConfigureAwait(false);
 
         // Configure filterable attributes.
