@@ -128,7 +128,16 @@
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />
                         <div class="fieldDescription">
-                            0 uses half your CPU cores, leaving headroom for transcoding. Default: 0
+                            0 uses half your CPU cores, leaving headroom for transcoding. Only applies to the CPU -
+                            a GPU provider schedules its own work. Default: 0
+                        </div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="embeddingOnnxRuntimePath" label="ONNX Runtime Library Path" />
+                        <div class="fieldDescription">
+                            Leave empty unless you want to run embedding on a GPU. The plugin uses the fastest
+                            execution provider the loaded ONNX Runtime offers and falls back to the CPU, and the
+                            build shipped here is CPU-only.
                         </div>
                     </div>
                     <div class="inputContainer">
@@ -333,6 +342,7 @@
             // read what is configured, and the model picker is also the off switch, so it stays live.
             var SEMANTIC_TUNING_CONTROLS = [
                 '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
+                '#embeddingOnnxRuntimePath',
                 '#embeddingBatchSize', '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
                 '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
                 '#unloadModelBtn'
@@ -434,6 +444,26 @@
                     var modelDirectory = pick(stats, 'EmbeddingModelDirectory');
                     if (modelDirectory) {
                         lines.push('<div><strong>Model directory:</strong> ' + escapeHtml(modelDirectory) + '</div>');
+                    }
+
+                    var activeProvider = pick(stats, 'EmbeddingExecutionProvider');
+                    if (activeProvider) {
+                        var providerLabels = {
+                            Cpu: 'CPU',
+                            Cuda: 'NVIDIA CUDA',
+                            Rocm: 'AMD ROCm',
+                            DirectMl: 'DirectML',
+                            CoreMl: 'Apple CoreML',
+                            OpenVino: 'Intel OpenVINO'
+                        };
+                        lines.push('<div><strong>Running on:</strong> '
+                            + escapeHtml(providerLabels[activeProvider] || activeProvider) + '</div>');
+
+                        var providers = pick(stats, 'EmbeddingAvailableProviders');
+                        if (providers && providers.length > 0) {
+                            lines.push('<div><strong>Available providers:</strong> '
+                                + escapeHtml(providers.join(', ')) + '</div>');
+                        }
                     }
 
                     var cacheCount = pick(stats, 'EmbeddingCacheCount');
@@ -553,6 +583,8 @@
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingBatchSize', config.EmbeddingBatchSize, 8);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
+                        document.querySelector('#embeddingOnnxRuntimePath').value =
+                            config.EmbeddingOnnxRuntimePath || '';
                         setNumericInput('#embeddingIdleUnloadMinutes', config.EmbeddingIdleUnloadMinutes, 0);
                         document.querySelector('#binaryQuantizeVectors').checked = config.BinaryQuantizeVectors !== false;
                         document.querySelector('#enableEmbeddingCache').checked = config.EnableEmbeddingCache !== false;
@@ -596,6 +628,7 @@
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingBatchSize = parseIntOrDefault(document.querySelector('#embeddingBatchSize').value, 8);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
+                        config.EmbeddingOnnxRuntimePath = document.querySelector('#embeddingOnnxRuntimePath').value;
                         config.EmbeddingIdleUnloadMinutes = parseIntOrDefault(document.querySelector('#embeddingIdleUnloadMinutes').value, 0);
                         config.BinaryQuantizeVectors = document.querySelector('#binaryQuantizeVectors').checked;
                         config.EnableEmbeddingCache = document.querySelector('#enableEmbeddingCache').checked;

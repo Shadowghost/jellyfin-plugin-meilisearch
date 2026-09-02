@@ -51,6 +51,7 @@ public class PluginConfiguration : BasePluginConfiguration
         EmbeddingMaxTokens = 256;
         EmbeddingBatchSize = 8;
         EmbeddingThreads = 0;
+        EmbeddingOnnxRuntimePath = string.Empty;
         EmbeddingIdleUnloadMinutes = 5;
         EnableEmbeddingCache = true;
         EmbeddingCacheMaxEntries = 0;
@@ -208,6 +209,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// available processors, leaving headroom for transcoding and the rest of the server.
     /// </summary>
     public int EmbeddingThreads { get; set; }
+
+    /// <summary>
+    /// Gets or sets the path to an alternative ONNX Runtime native library - either the file itself
+    /// or a directory holding it. Empty means the CPU build bundled with the plugin.
+    /// </summary>
+    public string EmbeddingOnnxRuntimePath { get; set; }
 
     /// <summary>
     /// Gets or sets how many minutes the model may sit unused before it is released from memory,
