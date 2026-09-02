@@ -190,17 +190,19 @@ public class MeilisearchIndexService : IHostedService, IDisposable
             return;
         }
 
-        if (string.Equals(indexed, selected.Id, StringComparison.Ordinal))
+        if (string.Equals(indexed, selected.IndexIdentity, StringComparison.Ordinal))
         {
             return;
         }
 
+        // Covers both a different model being selected and the same model now being embedded
+        // differently; either way the stored vectors are not comparable with new ones.
         _logger.LogWarning(
-            "The Meilisearch index was built with the embedding model {IndexedModel} but {SelectedModel} is now selected. "
-            + "Vectors do not carry across models, so semantic search behaves as keyword-only until you run the "
-            + "'Rebuild Meilisearch Index' task",
+            "The Meilisearch index holds vectors from {IndexedModel} but this version produces {SelectedModel}. "
+            + "Vectors from the two are not comparable, so semantic search behaves as keyword-only - and can rank "
+            + "worse than that - until you run the 'Rebuild Meilisearch Index' task",
             indexed,
-            selected.Id);
+            selected.IndexIdentity);
     }
 
     /// <inheritdoc />

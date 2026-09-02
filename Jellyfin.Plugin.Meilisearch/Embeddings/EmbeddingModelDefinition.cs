@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using Microsoft.Extensions.Logging;
@@ -59,13 +60,33 @@ public sealed record EmbeddingModelDefinition(
     Func<EmbeddingModelDescriptor, int, ILogger, ITextEmbedder> CreateEmbedder)
 {
     /// <summary>
+    /// How this plugin version turns text into a vector, independent of which model does it.
+    /// </summary>
+    /// <remarks>
+    /// Bumped when the procedure changes such that older vectors are no longer comparable with new
+    /// ones from the same model file. Revision 2 stopped batching and padding, which moved the
+    /// quantized model's activation scales. Carried in <see cref="Fingerprint"/> and
+    /// <see cref="IndexIdentity"/> so the cache and the built index are both treated as stale.
+    /// </remarks>
+    public const int EmbeddingRevision = 2;
+
+    /// <summary>
     /// Gets every repository-relative file the model is made of, weights first.
     /// </summary>
     public IEnumerable<string> Files => SupportFiles.Prepend(ModelFile);
 
     /// <summary>
     /// Gets the model's identity as stored in the vector cache header, so a cache written by a
-    /// different model - or by a different export of this one - is never read back as this one's.
+    /// different model - or by a different export or embedding procedure - is never read back as
+    /// this one's.
     /// </summary>
-    public string Fingerprint => Repository + "/" + Path.GetFileName(ModelFile);
+    public string Fingerprint
+        => Repository + "/" + Path.GetFileName(ModelFile) + "@r"
+            + EmbeddingRevision.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Gets what gets recorded against a built index, so that a rebuild is asked for when either the
+    /// model or the way it is used changes.
+    /// </summary>
+    public string IndexIdentity => Id + "@r" + EmbeddingRevision.ToString(CultureInfo.InvariantCulture);
 }

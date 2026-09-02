@@ -49,7 +49,6 @@ public class PluginConfiguration : BasePluginConfiguration
         EmbeddingModelPath = string.Empty;
         SemanticRatio = 50;
         EmbeddingMaxTokens = 256;
-        EmbeddingBatchSize = 8;
         EmbeddingThreads = 0;
         EmbeddingOnnxRuntimePath = string.Empty;
         EmbeddingIdleUnloadMinutes = 5;
@@ -198,11 +197,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// this caps the cost of the long overviews that dominate inference time.
     /// </summary>
     public int EmbeddingMaxTokens { get; set; }
-
-    /// <summary>
-    /// Gets or sets the number of documents embedded per forward pass.
-    /// </summary>
-    public int EmbeddingBatchSize { get; set; }
 
     /// <summary>
     /// Gets or sets the number of CPU threads used for inference. Zero lets the plugin pick half the

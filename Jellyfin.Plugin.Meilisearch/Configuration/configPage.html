@@ -122,10 +122,6 @@
                         <div class="fieldDescription">How much of each item's metadata is embedded. Higher is slower. Default: 256</div>
                     </div>
                     <div class="inputContainer">
-                        <input is="emby-input" type="number" id="embeddingBatchSize" min="1" max="64" step="1" label="Embedding Batch Size" />
-                        <div class="fieldDescription">Items per forward pass. Default: 8</div>
-                    </div>
-                    <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />
                         <div class="fieldDescription">
                             0 uses half your CPU cores, leaving headroom for transcoding. Only applies to the CPU -
@@ -343,7 +339,7 @@
             var SEMANTIC_TUNING_CONTROLS = [
                 '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
                 '#embeddingOnnxRuntimePath',
-                '#embeddingBatchSize', '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
+                '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
                 '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
                 '#unloadModelBtn'
             ];
@@ -581,7 +577,6 @@
                         document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
                         setNumericInput('#semanticRatio', config.SemanticRatio, 50);
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
-                        setNumericInput('#embeddingBatchSize', config.EmbeddingBatchSize, 8);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
                         document.querySelector('#embeddingOnnxRuntimePath').value =
                             config.EmbeddingOnnxRuntimePath || '';
@@ -626,7 +621,6 @@
                         config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
                         config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 50);
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
-                        config.EmbeddingBatchSize = parseIntOrDefault(document.querySelector('#embeddingBatchSize').value, 8);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
                         config.EmbeddingOnnxRuntimePath = document.querySelector('#embeddingOnnxRuntimePath').value;
                         config.EmbeddingIdleUnloadMinutes = parseIntOrDefault(document.querySelector('#embeddingIdleUnloadMinutes').value, 0);

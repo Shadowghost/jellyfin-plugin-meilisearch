@@ -20,6 +20,10 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 /// </summary>
 public sealed class EmbeddingService : IHostedService, IDisposable
 {
+    // Texts handed to the embedder per call. Each gets its own forward pass regardless, so this only
+    // sets how often a long run checks for cancellation and reports progress - about twice a second.
+    private const int EmbedChunkSize = 8;
+
     private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMinutes(1);
 
     private readonly ILogger<EmbeddingService> _logger;
@@ -406,7 +410,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
         var queryPrompt = ActiveModel.QueryPrompt;
         var prompt = queryPrompt.Length == 0 ? searchTerm : queryPrompt + " " + searchTerm;
-        var vectors = EmbedInternal([prompt], cancellationToken);
+        var vectors = EmbedInternal([prompt], EmbeddingPriority.Interactive, cancellationToken);
         if (vectors.Count == 0 || vectors[0] is not { Length: > 0 } vector)
         {
             return null;
@@ -468,6 +472,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
                 onProgress is null
                     ? null
                     : computed => onProgress(new EmbeddingProgress(computed, texts.Count, 0, computed)),
+                EmbeddingPriority.Batch,
                 cancellationToken);
         }
 
@@ -500,6 +505,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             onProgress is null
                 ? null
                 : computed => onProgress(new EmbeddingProgress(cacheHits + computed, texts.Count, cacheHits, computed)),
+            EmbeddingPriority.Batch,
             cancellationToken);
 
         for (var i = 0; i < missIndexes!.Count && i < embedded.Count; i++)
@@ -703,12 +709,16 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             : configured;
     }
 
-    private IReadOnlyList<float[]?> EmbedInternal(IReadOnlyList<string> texts, CancellationToken cancellationToken)
-        => EmbedInternal(texts, null, cancellationToken);
+    private IReadOnlyList<float[]?> EmbedInternal(
+        IReadOnlyList<string> texts,
+        EmbeddingPriority priority,
+        CancellationToken cancellationToken)
+        => EmbedInternal(texts, null, priority, cancellationToken);
 
     private IReadOnlyList<float[]?> EmbedInternal(
         IReadOnlyList<string> texts,
         Action<int>? onComputed,
+        EmbeddingPriority priority,
         CancellationToken cancellationToken)
     {
         var embedder = _embedder;
@@ -718,24 +728,23 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         }
 
         var maxTokens = Math.Clamp(Configuration.EmbeddingMaxTokens, 16, 8192);
-        var batchSize = Math.Clamp(Configuration.EmbeddingBatchSize, 1, 64);
 
         try
         {
-            if (texts.Count <= batchSize)
+            if (texts.Count <= EmbedChunkSize)
             {
-                var single = embedder.Embed(texts, maxTokens, cancellationToken);
+                var single = embedder.Embed(texts, maxTokens, priority, cancellationToken);
                 onComputed?.Invoke(texts.Count);
                 return single;
             }
 
             var results = new List<float[]?>(texts.Count);
-            for (var offset = 0; offset < texts.Count; offset += batchSize)
+            for (var offset = 0; offset < texts.Count; offset += EmbedChunkSize)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var slice = texts.Skip(offset).Take(batchSize).ToList();
-                results.AddRange(embedder.Embed(slice, maxTokens, cancellationToken));
+                var slice = texts.Skip(offset).Take(EmbedChunkSize).ToList();
+                results.AddRange(embedder.Embed(slice, maxTokens, priority, cancellationToken));
                 onComputed?.Invoke(results.Count);
             }
 

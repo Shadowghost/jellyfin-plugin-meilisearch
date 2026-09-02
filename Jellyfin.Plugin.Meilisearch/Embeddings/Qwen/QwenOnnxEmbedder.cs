@@ -22,15 +22,12 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     private const int KeyValueHeads = 8;
     private const int HeadDimensions = 128;
 
-    // Padded sequence lengths are rounded up to a multiple of this. ONNX Runtime plans the buffers a
-    // forward pass needs per input shape and sizes its arena to the largest plan it has produced, so
-    // batching to the exact longest row gives it a new shape almost every pass and leaves the arena
-    // holding the high-water mark of all of them. Rounding to a coarse grid collapses a few hundred
-    // shapes into a handful, at a cost of at most this many padding tokens.
-    private const int SequenceLengthGranularity = 32;
+    // How many times a batch caller gives up its turn to arriving searches before taking the model
+    // anyway. Without a bound, a steady stream of searches would stall indexing indefinitely.
+    private const int MaxBatchYields = 32;
 
-    // How long Dispose waits for a forward pass that is already running. Inference is bounded by the
-    // token budget and batch size, so anything beyond this means the call is wedged rather than slow.
+    // How long Dispose waits for a running forward pass. One pass is bounded by the token budget, so
+    // anything beyond this means the call is wedged rather than slow.
     private static readonly TimeSpan DisposeDrainTimeout = TimeSpan.FromSeconds(60);
 
     private readonly ILogger _logger;
@@ -43,8 +40,11 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     private readonly EmbeddingExecutionProvider _provider;
 #pragma warning disable CA2213 // Deliberately not disposed; see the remarks on Dispose.
     private readonly SemaphoreSlim _inferenceLock = new(1, 1);
+    private readonly ManualResetEventSlim _noSearchWaiting = new(true);
 #pragma warning restore CA2213
     private readonly object _disposeGate = new();
+
+    private int _searchesWaiting;
     private volatile bool _disposed;
 
     private QwenOnnxEmbedder(
@@ -161,92 +161,158 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
     /// </summary>
     /// <param name="texts">The texts to embed.</param>
     /// <param name="maxTokens">Maximum tokens to keep per text.</param>
+    /// <param name="priority">Whether this request may be made to wait for searches.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
     /// One vector per input, in the same order. An entry is null when the corresponding text was
     /// empty and produced no tokens to pool, or when the model was released mid-call.
     /// </returns>
-    public IReadOnlyList<float[]?> Embed(IReadOnlyList<string> texts, int maxTokens, CancellationToken cancellationToken)
+    public IReadOnlyList<float[]?> Embed(
+        IReadOnlyList<string> texts,
+        int maxTokens,
+        EmbeddingPriority priority,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(texts);
 
+        var results = new float[texts.Count][];
         if (texts.Count == 0 || _disposed)
         {
-            return new float[texts.Count][];
+            return results;
         }
 
-        var rows = new long[texts.Count][];
+        var populated = new List<(long[] Row, int Index)>(texts.Count);
         for (var i = 0; i < texts.Count; i++)
         {
-            rows[i] = _tokenizer.Encode(texts[i], maxTokens);
+            var row = _tokenizer.Encode(texts[i], maxTokens);
+            if (row.Length > 0)
+            {
+                populated.Add((row, i));
+            }
         }
-
-        var results = new float[texts.Count][];
-        var populated = rows.Select(static (row, index) => (row, index))
-            .Where(static entry => entry.row.Length > 0)
-            .ToList();
 
         if (populated.Count == 0)
         {
             return results;
         }
 
-        // ONNX Runtime sessions are thread-safe, but concurrent Run calls each spin up their own
-        // intra-op work; serializing keeps CPU use bounded to the configured thread count. The same
-        // lock is what makes disposal safe - see Dispose.
-        _inferenceLock.Wait(cancellationToken);
-        try
+        // One text per pass at its own token length, not a tuning choice: the model is dynamically
+        // quantized, so the activation scales come from whatever shares the input tensor. Batched
+        // next to one other text of identical length, a vector came back at cosine 0.937 to the same
+        // text alone - and a query is always embedded alone.
+        foreach (var (row, index) in populated)
         {
-            // Re-checked while holding the lock. Dispose sets the flag and then takes this lock, so
-            // once we are past this point the native session cannot be released underneath us.
-            if (_disposed)
+            EnterInference(priority, cancellationToken);
+            try
             {
-                return results;
+                // Re-checked while holding the lock. Dispose sets the flag and then takes this lock,
+                // so once we are past this point the native session cannot be released under us.
+                if (_disposed)
+                {
+                    return results;
+                }
+
+                results[index] = RunSingle(row, cancellationToken);
             }
-
-            var batchRows = populated.Select(static entry => entry.row).ToList();
-            var vectors = RunBatch(batchRows, cancellationToken);
-
-            for (var i = 0; i < populated.Count; i++)
+            finally
             {
-                results[populated[i].index] = vectors[i];
+                ExitInference(priority);
             }
-        }
-        finally
-        {
-            _inferenceLock.Release();
         }
 
         return results;
     }
 
-    private float[][] RunBatch(IReadOnlyList<long[]> rows, CancellationToken cancellationToken)
+    /// <summary>
+    /// Acquires the model.
+    /// </summary>
+    /// <remarks>
+    /// Sessions are thread-safe, but concurrent Run calls each spin up their own intra-op work, so
+    /// serializing keeps CPU use within the configured thread count; it is also what makes disposal
+    /// safe. A pass cannot be interrupted, so indexing yields by not starting one while a search
+    /// waits.
+    /// </remarks>
+    private void EnterInference(EmbeddingPriority priority, CancellationToken cancellationToken)
     {
-        var batch = rows.Count;
-        var maxLength = RoundUpSequenceLength(rows.Max(static row => row.Length));
-
-        var inputIds = new long[batch * maxLength];
-        var attentionMask = new long[batch * maxLength];
-        var positionIds = new long[batch * maxLength];
-
-        for (var b = 0; b < batch; b++)
+        if (priority == EmbeddingPriority.Interactive)
         {
-            var row = rows[b];
-            for (var i = 0; i < maxLength; i++)
+            if (Interlocked.Increment(ref _searchesWaiting) == 1)
             {
-                var offset = (b * maxLength) + i;
-                positionIds[offset] = i;
-
-                if (i < row.Length)
-                {
-                    inputIds[offset] = row[i];
-                    attentionMask[offset] = 1;
-                }
+                _noSearchWaiting.Reset();
             }
+
+            try
+            {
+                _inferenceLock.Wait(cancellationToken);
+            }
+            catch
+            {
+                LeaveSearchQueue();
+                throw;
+            }
+
+            return;
         }
 
-        long[] shape = [batch, maxLength];
-        long[] emptyCacheShape = [batch, KeyValueHeads, 0, HeadDimensions];
+        for (var yields = 0; ; yields++)
+        {
+            _noSearchWaiting.Wait(cancellationToken);
+            _inferenceLock.Wait(cancellationToken);
+
+            // A search may have arrived while this was queueing for the lock, and the semaphore
+            // makes no ordering promise anyway. Step aside for it - but only so many times, or a
+            // steady stream of searches would stall indexing for good.
+            if (Volatile.Read(ref _searchesWaiting) == 0 || yields >= MaxBatchYields)
+            {
+                return;
+            }
+
+            _inferenceLock.Release();
+        }
+    }
+
+    private void ExitInference(EmbeddingPriority priority)
+    {
+        _inferenceLock.Release();
+
+        if (priority == EmbeddingPriority.Interactive)
+        {
+            LeaveSearchQueue();
+        }
+    }
+
+    private void LeaveSearchQueue()
+    {
+        if (Interlocked.Decrement(ref _searchesWaiting) == 0)
+        {
+            _noSearchWaiting.Set();
+        }
+    }
+
+    /// <summary>
+    /// Runs one text through the model and pools its vector.
+    /// </summary>
+    /// <param name="row">The token ids, at exactly their own length - no padding.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The normalized vector.</returns>
+    /// <remarks>
+    /// Each distinct length costs one execution plan the first time it is seen. The arena still only
+    /// grows to the largest, which is now one row of the token cap rather than a whole batch of it.
+    /// </remarks>
+    private float[] RunSingle(long[] row, CancellationToken cancellationToken)
+    {
+        var length = row.Length;
+
+        var attentionMask = new long[length];
+        var positionIds = new long[length];
+        for (var i = 0; i < length; i++)
+        {
+            attentionMask[i] = 1;
+            positionIds[i] = i;
+        }
+
+        long[] shape = [1, length];
+        long[] emptyCacheShape = [1, KeyValueHeads, 0, HeadDimensions];
 
         var names = new List<string>(3 + _pastKeyValueNames.Length);
         var values = new List<OrtValue>(names.Capacity);
@@ -254,7 +320,7 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
         try
         {
             names.Add("input_ids");
-            values.Add(OrtValue.CreateTensorValueFromMemory(inputIds, shape));
+            values.Add(OrtValue.CreateTensorValueFromMemory(row, shape));
 
             names.Add("attention_mask");
             values.Add(OrtValue.CreateTensorValueFromMemory(attentionMask, shape));
@@ -275,16 +341,9 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
 
             using var runOptions = new RunOptions();
 
-            // Jellyfin embeds in bursts: a reindex works through the library and then nothing asks
-            // for a vector again for days. Without this the arena keeps whatever that burst needed
-            // for the life of the server, which is memory a media server would rather spend on
-            // playback. Returning it costs an allocation cycle per pass, against twenty-eight
-            // transformer layers of work in the same pass.
-            //
-            // Only on the CPU. A GPU provider allocates and frees through its own device arena, where
-            // the same round trip is a device synchronization on every pass - it would cost more than
-            // the inference it wraps, and the idle unload already gives the memory back by releasing
-            // the whole session.
+            // Embedding comes in bursts, and without this the arena keeps whatever the burst needed
+            // for the life of the server. CPU only: on a GPU provider the same round trip is a
+            // device synchronization per pass, and the idle unload already returns that memory.
             if (_provider == EmbeddingExecutionProvider.Cpu)
             {
                 runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
@@ -292,25 +351,14 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
 
             using var outputs = _session.Run(runOptions, names, values, [HiddenStateOutput]);
 
+            // Last-token pooling, as the model's pooling config specifies. With no padding, the last
+            // token of the sequence is the last real token.
             var hidden = outputs[0].GetTensorDataAsSpan<float>();
-            var vectors = new float[batch][];
+            var vector = new float[_dimensions];
+            hidden.Slice((length - 1) * _dimensions, _dimensions).CopyTo(vector);
+            Normalize(vector);
 
-            for (var b = 0; b < batch; b++)
-            {
-                // Last-token pooling, as the model's pooling config specifies. Padding sits to the
-                // right of the real tokens and attention here is causal, so the hidden state at the
-                // final real token is identical to what it would be with no padding at all.
-                var lastRealToken = rows[b].Length - 1;
-                var start = ((b * maxLength) + lastRealToken) * _dimensions;
-
-                var vector = new float[_dimensions];
-                hidden.Slice(start, _dimensions).CopyTo(vector);
-                Normalize(vector);
-
-                vectors[b] = vector;
-            }
-
-            return vectors;
+            return vector;
         }
         finally
         {
@@ -320,12 +368,6 @@ public sealed class QwenOnnxEmbedder : ITextEmbedder
             }
         }
     }
-
-    /// <summary>
-    /// Rounds a token count up to the grid the batch is padded to.
-    /// </summary>
-    private static int RoundUpSequenceLength(int length)
-        => (length + SequenceLengthGranularity - 1) / SequenceLengthGranularity * SequenceLengthGranularity;
 
     private static void Normalize(float[] vector)
     {

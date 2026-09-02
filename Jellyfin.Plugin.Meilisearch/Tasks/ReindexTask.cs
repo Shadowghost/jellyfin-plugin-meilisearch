@@ -412,7 +412,7 @@ public class ReindexTask : IScheduledTask
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
                 plugin.Configuration.IndexSchemaVersion = MeilisearchDocument.SchemaVersion;
                 plugin.Configuration.IndexedEmbeddingModelId = _embeddings.IsReady
-                    ? EmbeddingService.ActiveModel.Id
+                    ? EmbeddingService.ActiveModel.IndexIdentity
                     : string.Empty;
                 plugin.SaveConfiguration();
                 _logger.LogInformation("Updated incremental sync watermark to {RunStart:O}", runStart);
