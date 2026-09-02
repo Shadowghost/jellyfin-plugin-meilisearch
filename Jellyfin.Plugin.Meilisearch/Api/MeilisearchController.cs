@@ -151,7 +151,7 @@ public class MeilisearchController : ControllerBase
 
         var indexed = configuration.IndexedEmbeddingModelId;
         return !string.IsNullOrEmpty(indexed)
-            && !string.Equals(indexed, EmbeddingService.ActiveModel.Id, StringComparison.Ordinal);
+            && !string.Equals(indexed, EmbeddingService.ActiveModel.IndexIdentity, StringComparison.Ordinal);
     }
 
     /// <summary>
