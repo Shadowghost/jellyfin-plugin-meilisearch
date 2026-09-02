@@ -31,10 +31,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IScheduledTask, ReindexTask>();
         serviceCollection.AddSingleton<IScheduledTask, DownloadEmbeddingModelTask>();
 
-        // The incremental sync is both a scheduled task and what the post-scan hook runs, so it is
-        // registered as a concrete type and surfaced as IScheduledTask through the same instance.
-        serviceCollection.AddSingleton<IncrementalReindexTask>();
-        serviceCollection.AddSingleton<IScheduledTask>(sp => sp.GetRequiredService<IncrementalReindexTask>());
+        serviceCollection.AddSingleton<IScheduledTask, IncrementalReindexTask>();
 
         // Jellyfin collects post-scan tasks by scanning plugin assemblies and instantiating them
         // through the container, so this registration exists to supply the constructor arguments.
