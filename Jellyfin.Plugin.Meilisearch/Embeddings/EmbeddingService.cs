@@ -428,6 +428,23 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>One vector per input in the same order; an entry is null when it could not be embedded.</returns>
     public IReadOnlyList<float[]?> EmbedDocuments(IReadOnlyList<string> texts, CancellationToken cancellationToken)
+        => EmbedDocuments(texts, null, cancellationToken);
+
+    /// <summary>
+    /// Embeds documents for indexing, reporting progress as it goes.
+    /// </summary>
+    /// <param name="texts">The document texts, as built by <see cref="BuildDocumentText"/>.</param>
+    /// <param name="onProgress">
+    /// Called as documents are finished, on the calling thread. Invoked once for the cache hits and
+    /// then once per forward pass, so a caller can distinguish a batch that read its vectors from
+    /// disk in milliseconds from one that is grinding through them on the CPU.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>One vector per input in the same order; an entry is null when it could not be embedded.</returns>
+    public IReadOnlyList<float[]?> EmbedDocuments(
+        IReadOnlyList<string> texts,
+        Action<EmbeddingProgress>? onProgress,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(texts);
 
@@ -446,7 +463,12 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
         if (_cache is not { } cache)
         {
-            return EmbedInternal(texts, cancellationToken);
+            return EmbedInternal(
+                texts,
+                onProgress is null
+                    ? null
+                    : computed => onProgress(new EmbeddingProgress(computed, texts.Count, 0, computed)),
+                cancellationToken);
         }
 
         var results = new float[texts.Count][];
@@ -465,12 +487,20 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             (missTexts ??= []).Add(texts[i]);
         }
 
+        var cacheHits = texts.Count - (missTexts?.Count ?? 0);
+        onProgress?.Invoke(new EmbeddingProgress(cacheHits, texts.Count, cacheHits, 0));
+
         if (missTexts is null)
         {
             return results;
         }
 
-        var embedded = EmbedInternal(missTexts, cancellationToken);
+        var embedded = EmbedInternal(
+            missTexts,
+            onProgress is null
+                ? null
+                : computed => onProgress(new EmbeddingProgress(cacheHits + computed, texts.Count, cacheHits, computed)),
+            cancellationToken);
 
         for (var i = 0; i < missIndexes!.Count && i < embedded.Count; i++)
         {
@@ -507,6 +537,23 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <param name="documents">The documents to embed.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public void AttachVectors(IReadOnlyList<MeilisearchDocument> documents, CancellationToken cancellationToken)
+        => AttachVectors(documents, null, cancellationToken);
+
+    /// <summary>
+    /// Embeds a batch of documents and attaches the vectors to them in place, reporting progress as
+    /// it goes.
+    /// </summary>
+    /// <param name="documents">The documents to embed.</param>
+    /// <param name="onProgress">
+    /// Called as documents are finished, on the calling thread. A reindex batch is thousands of
+    /// items and a cache-cold forward pass is slow, so this is what lets a long batch report
+    /// something other than silence.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public void AttachVectors(
+        IReadOnlyList<MeilisearchDocument> documents,
+        Action<EmbeddingProgress>? onProgress,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(documents);
 
@@ -529,7 +576,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             texts[i] = BuildDocumentText(documents[i]);
         }
 
-        var vectors = EmbedDocuments(texts, cancellationToken);
+        var vectors = EmbedDocuments(texts, onProgress, cancellationToken);
 
         for (var i = 0; i < documents.Count && i < vectors.Count; i++)
         {
@@ -657,6 +704,12 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     }
 
     private IReadOnlyList<float[]?> EmbedInternal(IReadOnlyList<string> texts, CancellationToken cancellationToken)
+        => EmbedInternal(texts, null, cancellationToken);
+
+    private IReadOnlyList<float[]?> EmbedInternal(
+        IReadOnlyList<string> texts,
+        Action<int>? onComputed,
+        CancellationToken cancellationToken)
     {
         var embedder = _embedder;
         if (embedder is null)
@@ -671,7 +724,9 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         {
             if (texts.Count <= batchSize)
             {
-                return embedder.Embed(texts, maxTokens, cancellationToken);
+                var single = embedder.Embed(texts, maxTokens, cancellationToken);
+                onComputed?.Invoke(texts.Count);
+                return single;
             }
 
             var results = new List<float[]?>(texts.Count);
@@ -681,6 +736,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
                 var slice = texts.Skip(offset).Take(batchSize).ToList();
                 results.AddRange(embedder.Embed(slice, maxTokens, cancellationToken));
+                onComputed?.Invoke(results.Count);
             }
 
             return results;

@@ -170,6 +170,24 @@ public class IncrementalReindexTask : IScheduledTask
         var totalCount = itemIds.Count;
         _logger.LogInformation("Found {TotalCount} modified items to sync", totalCount);
 
+        var reporter = new ReindexEmbeddingReporter(
+            _embeddings,
+            _logger,
+            progress,
+            fraction => Math.Min(fraction * 95d, 95d),
+            totalCount);
+
+        // Said once, up front: on a cold vector cache this is the difference between a sweep that
+        // ends in seconds and one that runs most of a day, and that is not apparent from watching it.
+        if (_embeddings.IsEnabled && totalCount > 0)
+        {
+            _logger.LogInformation(
+                "Semantic search is on, so up to {TotalCount} vectors may have to be computed for this sweep. "
+                + "Vectors already in the cache are reused; the rest run through the embedding model, and "
+                + "progress is logged as they do",
+                totalCount);
+        }
+
         var taskUids = new ConcurrentBag<int>();
         using var semaphore = new SemaphoreSlim(parallelism, parallelism);
         var inFlight = new List<Task>();
@@ -262,9 +280,9 @@ public class IncrementalReindexTask : IScheduledTask
                     await _embeddings.EnsureReadyAsync(null, cancellationToken).ConfigureAwait(false);
                 }
 
-                _embeddings.AttachVectors(batch, cancellationToken);
-
                 batchNumber++;
+                reporter.AttachVectors(batch, batchNumber, startIndex, idChunk.Length, cancellationToken);
+
                 await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                 var batchToSubmit = batch;
                 inFlight.Add(Task.Run(
@@ -290,17 +308,19 @@ public class IncrementalReindexTask : IScheduledTask
 
             // Measured against the snapshot position rather than the item count, so items deleted
             // since the snapshot don't stall progress short of the end.
-            var fraction = Math.Min(1d, (double)Math.Min(startIndex, totalCount) / totalCount);
-            var progressPercent = Math.Min(fraction * 95d, 95d);
-            progress.Report(progressPercent);
+            var position = Math.Min(startIndex, totalCount);
+            var progressPercent = reporter.ReportProgress(position);
 
             _logger.LogInformation(
-                "Incremental batch {BatchNumber}: {IndexedCount} indexed, {SkippedCount} skipped, {ErrorCount} errors ({ProgressPercent:F1}%)",
+                "Incremental batch {BatchNumber}: {IndexedCount} indexed, {SkippedCount} skipped, "
+                + "{ErrorCount} errors ({ProgressPercent}%){Embedding}{Remaining}",
                 batchNumber,
                 indexedCount,
                 skippedCount,
                 errorCount,
-                progressPercent.ToString("F1", CultureInfo.InvariantCulture));
+                progressPercent.ToString("F1", CultureInfo.InvariantCulture),
+                reporter.DescribeLastBatch(),
+                reporter.DescribeRemaining(position));
         }
 
         await Task.WhenAll(inFlight).ConfigureAwait(false);
@@ -341,12 +361,15 @@ public class IncrementalReindexTask : IScheduledTask
 
         progress.Report(100);
         _logger.LogInformation(
-            "Incremental Meilisearch sync complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, {ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks). Next run will pick up changes since {NextSince:O}",
+            "Incremental Meilisearch sync complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, "
+            + "{ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks){Embedding}. "
+            + "Next run will pick up changes since {NextSince:O}",
             indexedCount,
             skippedCount,
             errorCount,
             batchNumber,
             taskUids.Count,
+            reporter.DescribeRun(),
             abortedEarly || taskFailures > 0 ? since : runStart);
     }
 }

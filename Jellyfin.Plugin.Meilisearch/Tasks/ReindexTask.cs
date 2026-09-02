@@ -207,6 +207,22 @@ public class ReindexTask : IScheduledTask
             var totalCount = itemIds.Count;
             _logger.LogInformation("Found {TotalCount} items to index", totalCount);
 
+            var reporter = new ReindexEmbeddingReporter(
+                _embeddings,
+                _logger,
+                progress,
+                fraction => Math.Min(2d + (fraction * 93d), 95d),
+                totalCount);
+
+            if (_embeddings.IsReady && totalCount > 0)
+            {
+                _logger.LogInformation(
+                    "Semantic search is on, so this rebuild needs a vector for each of {TotalCount} items. "
+                    + "Ones already in the cache are reused; the rest run through the embedding model, and "
+                    + "progress is logged as they do",
+                    totalCount);
+            }
+
             var taskUids = new ConcurrentBag<int>();
             using var semaphore = new SemaphoreSlim(parallelism, parallelism);
             var inFlight = new List<Task>();
@@ -297,10 +313,11 @@ public class ReindexTask : IScheduledTask
                 if (batch.Count > 0)
                 {
                     // Embed on this thread rather than inside the parallel push below: inference is
-                    // already internally parallel, and overlapping batches would oversubscribe the CPU.
-                    _embeddings.AttachVectors(batch, cancellationToken);
-
+                    // already internally parallel, and overlapping batches would oversubscribe the
+                    // CPU - or, on a GPU provider, the device.
                     batchNumber++;
+                    reporter.AttachVectors(batch, batchNumber, startIndex, idChunk.Length, cancellationToken);
+
                     await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var batchToSubmit = batch;
                     inFlight.Add(Task.Run(
@@ -326,17 +343,19 @@ public class ReindexTask : IScheduledTask
 
                 // Measured against the snapshot position rather than the item count, so items
                 // deleted since the snapshot don't stall progress short of the end.
-                var fraction = Math.Min(1d, (double)Math.Min(startIndex, totalCount) / totalCount);
-                var progressPercent = Math.Min(2d + (fraction * 93d), 95d);
-                progress.Report(progressPercent);
+                var position = Math.Min(startIndex, totalCount);
+                var progressPercent = reporter.ReportProgress(position);
 
                 _logger.LogInformation(
-                    "Indexed batch {BatchNumber}: {IndexedCount} indexed, {SkippedCount} skipped, {ErrorCount} errors ({ProgressPercent:F1}%)",
+                    "Indexed batch {BatchNumber}: {IndexedCount} indexed, {SkippedCount} skipped, "
+                    + "{ErrorCount} errors ({ProgressPercent}%){Embedding}{Remaining}",
                     batchNumber,
                     indexedCount,
                     skippedCount,
                     errorCount,
-                    progressPercent.ToString("F1", CultureInfo.InvariantCulture));
+                    progressPercent.ToString("F1", CultureInfo.InvariantCulture),
+                    reporter.DescribeLastBatch(),
+                    reporter.DescribeRemaining(position));
             }
 
             // Wait for all in-flight indexing requests to be accepted by Meilisearch.
@@ -365,12 +384,14 @@ public class ReindexTask : IScheduledTask
 
             progress.Report(100);
             _logger.LogInformation(
-                "Meilisearch reindex complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, {ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks)",
+                "Meilisearch reindex complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, "
+                + "{ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks){Embedding}",
                 indexedCount,
                 skippedCount,
                 errorCount,
                 batchNumber,
-                taskUids.Count);
+                taskUids.Count,
+                reporter.DescribeRun());
 
             // Anchor the incremental task's watermark so it doesn't re-index everything (or fall
             // back to the 24h heuristic) on its next run. We use the pre-work timestamp so any
