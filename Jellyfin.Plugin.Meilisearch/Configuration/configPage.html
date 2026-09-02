@@ -123,6 +123,17 @@
                         </div>
                     </div>
                     <div class="inputContainer">
+                        <input is="emby-input" type="number" id="minimumSemanticScore" min="0" max="100" step="1" label="Minimum Semantic Score (0-100)" />
+                        <div class="fieldDescription">
+                            How similar a result has to be before meaning-based search will return it. A vector search
+                            has no idea of &ldquo;no match&rdquo;: every item has some similarity to the query, so a
+                            query that matches nothing still fills the page. Keyword matches score far above any useful
+                            value here and are unaffected. 0 disables the floor. The right value depends on your
+                            library &mdash; watch the scores on a few searches that should return nothing before
+                            raising it. Default: 0
+                        </div>
+                    </div>
+                    <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
                         <div class="fieldDescription">How much of each item's metadata is embedded. Higher is slower. Default: 256</div>
                     </div>
@@ -342,7 +353,7 @@
             // Disabled rather than hidden: an admin on an unsupported host still has to be able to
             // read what is configured, and the model picker is also the off switch, so it stays live.
             var SEMANTIC_TUNING_CONTROLS = [
-                '#autoDownloadEmbeddingModel', '#semanticRatio', '#embeddingMaxTokens',
+                '#autoDownloadEmbeddingModel', '#semanticRatio', '#minimumSemanticScore', '#embeddingMaxTokens',
                 '#embeddingOnnxRuntimePath',
                 '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
                 '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
@@ -581,6 +592,7 @@
 
                         document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
                         setNumericInput('#semanticRatio', config.SemanticRatio, 75);
+                        setNumericInput('#minimumSemanticScore', config.MinimumSemanticScore, 0);
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
                         document.querySelector('#embeddingOnnxRuntimePath').value =
@@ -625,6 +637,7 @@
                         }
                         config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
                         config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 75);
+                        config.MinimumSemanticScore = parseIntOrDefault(document.querySelector('#minimumSemanticScore').value, 0);
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);
                         config.EmbeddingOnnxRuntimePath = document.querySelector('#embeddingOnnxRuntimePath').value;

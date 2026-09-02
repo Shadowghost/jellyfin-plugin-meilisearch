@@ -180,12 +180,7 @@ public class MeilisearchClientWrapper : IDisposable
                         AttributesToRetrieve = IdOnly
                     };
 
-                    var minScore = Configuration.MinimumMatchScore;
-                    if (minScore is not null && minScore > 0)
-                    {
-                        searchParams.RankingScoreThreshold = minScore / 100m;
-                    }
-
+                    ApplyScoreThreshold(searchParams, queryVector);
                     ApplyHybrid(searchParams, queryVector);
 
                     var stopwatch = Stopwatch.StartNew();
@@ -255,12 +250,7 @@ public class MeilisearchClientWrapper : IDisposable
                         AttributesToRetrieve = IdAndType
                     };
 
-                    var minScore = Configuration.MinimumMatchScore;
-                    if (minScore is not null && minScore > 0)
-                    {
-                        searchParams.RankingScoreThreshold = minScore.Value / 100m;
-                    }
-
+                    ApplyScoreThreshold(searchParams, queryVector);
                     ApplyHybrid(searchParams, queryVector);
 
                     var stopwatch = Stopwatch.StartNew();
@@ -976,6 +966,26 @@ public class MeilisearchClientWrapper : IDisposable
                 ? elapsedMilliseconds
                 : (SearchTimeSmoothingFactor * elapsedMilliseconds) + ((1 - SearchTimeSmoothingFactor) * _averageSearchMilliseconds);
             _searchCount++;
+        }
+    }
+
+    /// <summary>
+    /// Sets the score a hit has to reach to be returned at all.
+    /// </summary>
+    /// <param name="query">The query to augment.</param>
+    /// <param name="queryVector">The query embedding, or null for a pure keyword search.</param>
+    private static void ApplyScoreThreshold(SearchQuery query, double[]? queryVector)
+    {
+        var threshold = Math.Max(0, Configuration.MinimumMatchScore ?? 0);
+
+        if (queryVector is { Length: > 0 })
+        {
+            threshold = Math.Max(threshold, Math.Clamp(Configuration.MinimumSemanticScore, 0, 100));
+        }
+
+        if (threshold > 0)
+        {
+            query.RankingScoreThreshold = threshold / 100m;
         }
     }
 

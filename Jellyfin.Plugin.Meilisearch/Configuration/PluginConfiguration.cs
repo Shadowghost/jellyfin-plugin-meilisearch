@@ -48,6 +48,7 @@ public class PluginConfiguration : BasePluginConfiguration
         AutoDownloadEmbeddingModel = true;
         EmbeddingModelPath = string.Empty;
         SemanticRatio = 75;
+        MinimumSemanticScore = 0;
         EmbeddingMaxTokens = 256;
         EmbeddingThreads = 0;
         EmbeddingOnnxRuntimePath = string.Empty;
@@ -195,6 +196,18 @@ public class PluginConfiguration : BasePluginConfiguration
     /// ranking, so queries are not embedded at all. See the remarks there.
     /// </remarks>
     public int SemanticRatio { get; set; }
+
+    /// <summary>
+    /// Gets or sets the score, 0-100, a vector match has to reach to be returned at all, or zero to
+    /// return whatever the vector search ranks highest.
+    /// </summary>
+    /// <remarks>
+    /// A vector search has no notion of "no match" - every document has some similarity to the query
+    /// - so without a floor a query that matches nothing still fills the result page. Keyword hits
+    /// score 96 and up, clear of any useful value here, so this only trims the vector side. The
+    /// useful value depends on the library, hence a default of zero.
+    /// </remarks>
+    public int MinimumSemanticScore { get; set; }
 
     /// <summary>
     /// Gets or sets the maximum number of tokens embedded per item. Library metadata is short, and
