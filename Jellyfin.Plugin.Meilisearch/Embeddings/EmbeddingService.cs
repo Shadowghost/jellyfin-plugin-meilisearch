@@ -22,17 +22,20 @@ namespace Jellyfin.Plugin.Meilisearch.Embeddings;
 public sealed class EmbeddingService : IHostedService, IDisposable
 {
     /// <summary>
-    /// The lowest <see cref="PluginConfiguration.SemanticRatio"/> at which a query vector can still
-    /// change what Meilisearch returns.
+    /// The <see cref="PluginConfiguration.SemanticRatio"/> above which a vector match starts to
+    /// outrank an exact keyword match.
     /// </summary>
     /// <remarks>
     /// Hybrid search picks per hit rather than blending: the larger of
-    /// <c>keywordScore * (1 - ratio)</c> and <c>semanticScore * ratio</c> wins. Keyword hits score
-    /// about 1.0 and vector matches about 0.4, so the semantic side only wins above roughly 0.71.
-    /// Re-derive this if <see cref="EmbeddingModelDefinition.EmbeddingRevision"/> changes, since it
-    /// depends on the score scale.
+    /// <c>keywordScore * (1 - ratio)</c> and <c>semanticScore * ratio</c> wins. A keyword hit on a
+    /// title scores 1.0, while Meilisearch reports vector similarity as <c>(cosine + 1) / 2</c>, so
+    /// an unrelated item still scores around 0.7 - measured against a 330k-item library, where rank
+    /// 100 of a vector search sat at 0.70 and rank 5 at 0.73. Solving <c>1 - r &gt; 0.7r</c> puts the
+    /// crossover just under 0.6: above it every vector near-miss outranks every exact title match,
+    /// which is what buries a title the moment someone types the first word of it. Advisory only -
+    /// the ratio is passed to Meilisearch either way.
     /// </remarks>
-    public const int MinEffectiveSemanticRatio = 70;
+    public const int KeywordOutrankedSemanticRatio = 60;
 
     // Texts handed to the embedder per call. Each gets its own forward pass regardless, so this only
     // sets how often a long run checks for cancellation and reports progress - about twice a second.
@@ -187,10 +190,10 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Gets a value indicating whether the configured semantic ratio is high enough for a query
-    /// vector to affect the ranking. See <see cref="MinEffectiveSemanticRatio"/>.
+    /// Gets a value indicating whether the configured semantic ratio still leaves exact keyword
+    /// matches on top. See <see cref="KeywordOutrankedSemanticRatio"/>.
     /// </summary>
-    public bool IsSemanticRatioEffective => Configuration.SemanticRatio >= MinEffectiveSemanticRatio;
+    public bool IsSemanticRatioBalanced => Configuration.SemanticRatio < KeywordOutrankedSemanticRatio;
 
     private static PluginConfiguration Configuration => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
@@ -464,13 +467,14 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return null;
         }
 
-        // Before the model is touched: below the crossover the vector cannot change the ranking, so
-        // the forward pass would be tens of milliseconds spent on a number Meilisearch discards.
-        if (Configuration.SemanticRatio < MinEffectiveSemanticRatio)
+        // Before the model is touched: at a ratio of zero Meilisearch ignores the vector entirely,
+        // so the forward pass would be tens of milliseconds spent on a number it discards.
+        if (Configuration.SemanticRatio <= 0)
         {
-            WarnSemanticRatioIneffective();
             return null;
         }
+
+        WarnIfSemanticRatioOutranksKeywords();
 
         MarkUsed();
 
@@ -578,8 +582,13 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         }
     }
 
-    private void WarnSemanticRatioIneffective()
+    private void WarnIfSemanticRatioOutranksKeywords()
     {
+        if (IsSemanticRatioBalanced)
+        {
+            return;
+        }
+
         lock (_queryVectorGate)
         {
             if (_warnedSemanticRatio)
@@ -590,12 +599,12 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             _warnedSemanticRatio = true;
         }
 
-        _logger.LogInformation(
-            "Semantic search is enabled but the semantic ratio is {Ratio}, below the {Minimum} at which a "
-            + "vector can outrank a keyword match, so queries are not being embedded. Raise the ratio to use "
-            + "it, or turn semantic search off to stop loading the model",
+        _logger.LogWarning(
+            "The semantic ratio is {Ratio}, at or above the {Crossover} where a merely similar item outranks "
+            + "an exact title match, so searching for the first words of a title can push it off the page. "
+            + "Lower it to around 50 unless that is what you want",
             Configuration.SemanticRatio.ToString(CultureInfo.InvariantCulture),
-            MinEffectiveSemanticRatio.ToString(CultureInfo.InvariantCulture));
+            KeywordOutrankedSemanticRatio.ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>
@@ -958,6 +967,12 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
             _state = EmbeddingState.Disabled;
             return;
+        }
+
+        // The ratio may have moved either side of the crossover, so let the warning fire again.
+        lock (_queryVectorGate)
+        {
+            _warnedSemanticRatio = false;
         }
 
         // Re-initialize on a background task: this runs on the caller's config-save request.

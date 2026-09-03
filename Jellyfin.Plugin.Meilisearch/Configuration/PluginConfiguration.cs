@@ -49,7 +49,7 @@ public class PluginConfiguration : BasePluginConfiguration
         IndexedEmbeddingModelId = string.Empty;
         AutoDownloadEmbeddingModel = true;
         EmbeddingModelPath = string.Empty;
-        SemanticRatio = 75;
+        SemanticRatio = 50;
         MinimumSemanticScore = 0;
         EmbeddingMaxTokens = 256;
         EmbeddingThreads = 0;
@@ -200,11 +200,13 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>
     /// Gets or sets the balance between keyword and vector matching, 0-100. Zero is pure keyword
-    /// search, 100 is pure vector search.
+    /// search - the query is then not embedded at all - and 100 is pure vector search.
     /// </summary>
     /// <remarks>
-    /// Below <see cref="EmbeddingService.MinEffectiveSemanticRatio"/> a vector cannot change the
-    /// ranking, so queries are not embedded at all. See the remarks there.
+    /// The useful range is narrower than it looks: at or above
+    /// <see cref="EmbeddingService.KeywordOutrankedSemanticRatio"/> a merely similar item outranks
+    /// an exact title match, so the default sits below it and leaves vector hits to fill in beneath
+    /// the keyword ones. See the remarks there.
     /// </remarks>
     public int SemanticRatio { get; set; }
 
@@ -214,8 +216,11 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     /// <remarks>
     /// A vector search has no notion of "no match", so without a floor a query matching nothing still
-    /// fills the page. Keyword hits score 96 and up, so this only trims the vector side. The useful
-    /// value depends on the library, hence a default of zero.
+    /// fills the page. Meilisearch reports similarity as <c>(cosine + 1) / 2</c>, which puts even
+    /// unrelated items around 0.7, so a floor that bites has to be set close to that. Meilisearch
+    /// applies one threshold to both halves of a hybrid search, so this also raises the bar for
+    /// keyword hits; the code takes the higher of the two floors. The useful value depends on the
+    /// library, hence a default of zero.
     /// </remarks>
     public int MinimumSemanticScore { get; set; }
 

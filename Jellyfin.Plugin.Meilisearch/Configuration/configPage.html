@@ -139,10 +139,17 @@
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="semanticRatio" min="0" max="100" step="1" label="Semantic Ratio (0-100)" />
                         <div class="fieldDescription">
-                            0 is pure keyword search, 100 is pure meaning. Meilisearch picks one side per result rather
-                            than blending them, and a keyword match almost always outscores a vector one, so
-                            <strong>below 70 the vector cannot change the ranking at all</strong> &mdash; queries are not
-                            embedded there, which also saves the CPU it would cost. Default: 75
+                            0 is pure keyword search &mdash; the query is then not embedded at all &mdash; and 100 is
+                            pure meaning. Meilisearch picks one side per result rather than blending them, comparing
+                            <code>keyword&nbsp;&times;&nbsp;(1&nbsp;&minus;&nbsp;ratio)</code> against
+                            <code>similarity&nbsp;&times;&nbsp;ratio</code>. The catch is the scale: a keyword hit on a
+                            title scores 1.0, but similarity is reported as <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code>,
+                            so an item with nothing to do with your query still scores around 0.7.
+                            <br /><br />
+                            <strong>That puts the tipping point just under 60.</strong> Above it, every vaguely similar
+                            item outranks an exact title match, and typing the first words of a title pushes that title
+                            hundreds of results down. At 50 the keyword hits stay on top and the vector matches fill in
+                            underneath, which is what you usually want. Default: 50
                         </div>
                     </div>
                     <div class="inputContainer">
@@ -150,10 +157,13 @@
                         <div class="fieldDescription">
                             How similar a result has to be before meaning-based search will return it. A vector search
                             has no idea of &ldquo;no match&rdquo;: every item has some similarity to the query, so a
-                            query that matches nothing still fills the page. Keyword matches score far above any useful
-                            value here and are unaffected. 0 disables the floor. The right value depends on your
-                            library &mdash; watch the scores on a few searches that should return nothing before
-                            raising it. Default: 0
+                            query that matches nothing still fills the page. On the
+                            <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code> scale above, unrelated items sit near 0.7,
+                            so a floor only starts to bite around 72&ndash;78 &mdash; measured on a 330k-item library,
+                            where rank 100 of a vector search scored 0.70. Meilisearch applies a single threshold to
+                            both halves of a hybrid search, so this also raises the bar for keyword hits (the higher of
+                            this and <em>Minimum Match Score</em> wins); set it too high and weak keyword matches
+                            disappear with the noise. 0 disables the floor. Default: 0
                         </div>
                     </div>
                     <div class="inputContainer">
@@ -528,10 +538,10 @@
                             + escapeHtml((queryHitRate * 100).toFixed(1)) + '% of searches reused a vector</div>');
                     }
 
-                    if (pick(stats, 'SemanticRatioEffective') === false) {
-                        lines.push('<div><strong>Note:</strong> the semantic ratio is too low for meaning-based '
-                            + 'matching to affect results, so queries are not being embedded. Raise it above 70 '
-                            + 'to use semantic search.</div>');
+                    if (pick(stats, 'SemanticRatioBalanced') === false) {
+                        lines.push('<div style="color:orange;"><strong>Note:</strong> the semantic ratio is high '
+                            + 'enough that a merely similar item outranks an exact title match, so searching for '
+                            + 'the first words of a title can push it off the page. Lower it to around 50.</div>');
                     }
 
                     var embeddingError = pick(stats, 'EmbeddingError');
@@ -639,7 +649,7 @@
                         }
 
                         document.querySelector('#autoDownloadEmbeddingModel').checked = config.AutoDownloadEmbeddingModel !== false;
-                        setNumericInput('#semanticRatio', config.SemanticRatio, 75);
+                        setNumericInput('#semanticRatio', config.SemanticRatio, 50);
                         setNumericInput('#minimumSemanticScore', config.MinimumSemanticScore, 0);
                         setNumericInput('#embeddingMaxTokens', config.EmbeddingMaxTokens, 256);
                         setNumericInput('#embeddingThreads', config.EmbeddingThreads, 0);
@@ -686,7 +696,7 @@
                             config.EmbeddingModelId = selectedModel;
                         }
                         config.AutoDownloadEmbeddingModel = document.querySelector('#autoDownloadEmbeddingModel').checked;
-                        config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 75);
+                        config.SemanticRatio = parseIntOrDefault(document.querySelector('#semanticRatio').value, 50);
                         config.MinimumSemanticScore = parseIntOrDefault(document.querySelector('#minimumSemanticScore').value, 0);
                         config.EmbeddingMaxTokens = parseIntOrDefault(document.querySelector('#embeddingMaxTokens').value, 256);
                         config.EmbeddingThreads = parseIntOrDefault(document.querySelector('#embeddingThreads').value, 0);

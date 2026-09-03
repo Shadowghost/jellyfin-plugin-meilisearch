@@ -165,7 +165,8 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Synonyms | (empty) | One per line: `term=alt1,alt2` |
 | Embedding Model | `Off` | Meaning-based matching via a locally run model, or off for keyword-only (see [Semantic Search](#semantic-search)) |
 | Download the model automatically | `true` | Fetch the embedding model as soon as semantic search is enabled |
-| Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning |
+| Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning. Above ~60 a similar item outranks an exact title (see [Tuning](#tuning)) |
+| Minimum Semantic Score | `0` | Score a match has to reach to be returned at all; `0` disables the floor |
 | Max Tokens per Item | `256` | How much of each item's metadata is embedded |
 | Inference Threads | `0` | 0 uses half the available CPU cores |
 | ONNX Runtime Library Path | (empty) | An alternative ONNX Runtime, for running inference on a GPU |
@@ -321,10 +322,32 @@ disagree.
 
 ### Tuning
 
-**Semantic Ratio** is the dial that matters. At 0 vectors are ignored; at 100 keyword matching is
-ignored, and exact title searches get noticeably worse - a vector search for `Alien` happily returns
-every science-fiction film. The default of 50 keeps exact titles winning while letting descriptive
-queries work. If precise titles start losing to thematically similar items, lower it.
+**Semantic Ratio** is the dial that matters, and its useful range is narrower than the 0-100 it
+offers. Meilisearch does not blend the two halves of a hybrid search; it scores each hit on both and
+keeps the larger of `keyword x (1 - ratio)` and `similarity x ratio`. The two scales are not
+comparable: a keyword hit on a title scores 1.0, while similarity is reported as
+`(cosine + 1) / 2`, which leaves an item with nothing to do with the query sitting around 0.7.
+Measured against a 330k-item library, rank 100 of a vector search scored 0.70 and rank 5 scored 0.73.
+
+Solve `1 - r > 0.7r` and the tipping point lands just under **0.6**:
+
+| Ratio | What a search looks like |
+|-------|--------------------------|
+| 0 | Keyword only. The query is not embedded at all. |
+| ~50 (default) | Keyword hits on top, vector matches filling in underneath. |
+| 60 and up | Every vaguely similar item outranks an exact title match. Typing the first words of a title pushes that title hundreds of results down. |
+| 100 | Titles are irrelevant; `Alien` returns every science-fiction film. |
+
+Above the crossover the plugin logs a warning and the **Status** panel says so, because the symptom -
+purely semantic queries working while title searches stop finding anything - does not obviously point
+back at this setting.
+
+**Minimum Semantic Score** is the other half of that. A vector search has no notion of "no match", so
+a query matching nothing still fills the page with items scoring their 0.7. Because unrelated items
+sit that high, a floor only starts to bite around 72-78. Meilisearch applies one threshold to both
+halves of a hybrid search, so the plugin sends the higher of this and **Minimum Match Score** and it
+raises the bar for keyword hits too - set it too high and weak keyword matches disappear along with
+the noise. Watch the scores on a few searches that should return nothing before raising it.
 
 **Cache computed vectors on disk** is on by default and worth leaving on. It is persistent: it lives
 in `meilisearch-embedding-cache/<model id>` under Jellyfin's data directory (not the cache directory,
@@ -468,6 +491,7 @@ again; nothing is lost either way.
 | Status shows `Not supported on this platform` | ONNX Runtime has no native library for this OS and architecture, or the package was assembled without it. The **Status** panel names which. Nothing is downloaded while this is the case; either install ONNX Runtime system-wide or turn semantic search off. |
 | Status shows `Model not downloaded` | Automatic download is off. Run the **Download Meilisearch Embedding Model** task. |
 | Semantic search is `Ready` but results are unchanged | The existing documents have no vectors yet. Run **Rebuild Meilisearch Index**. |
+| Searching the first words of a title no longer finds it | **Semantic Ratio** is at or above ~60, where a merely similar item outranks an exact keyword match. Lower it to around 50 - see [Tuning](#tuning). |
 | Registering the embedder failed | Vector search needs Meilisearch 1.10 or newer. Older servers keep working as keyword-only. |
 | A rebuild re-embeds everything even though nothing changed | The vector cache starts empty for a model that has never been used, and is discarded if the same model's export or vector width changes. Switching between models does not reset either one's cache. |
 | Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |
