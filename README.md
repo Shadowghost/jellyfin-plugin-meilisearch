@@ -383,6 +383,13 @@ identity, because a vector computed under one is not the vector the next would p
 that a rebuild after the change would hand back exactly the vectors the change was meant to replace.
 The index keeps its old vectors until you run **Rebuild Meilisearch Index**.
 
+**Clear Vector Cache** throws the cache away by hand. Switching model or token budget already does it,
+so this is for vectors that look wrong rather than merely stale - after an interrupted run, or when a
+rebuild produced results that make no sense. Every vector it drops costs a forward pass to produce
+again, which is hours for a large library, and the index keeps what it already holds until the next
+rebuild. Like **Unload Model**, it refuses while a reindex is running, since a rebuild reads and
+writes the cache from beginning to end.
+
 > **The list of models is fixed, by design.** The tokenizer, the vector width, the key/value head
 > geometry, the pooling and the query instruction prefix are all part of a model, not settings around
 > it - each one needs an `ITextEmbedder` that knows them. So **Embedding Model** picks among the
@@ -500,6 +507,7 @@ again; nothing is lost either way.
 | A rebuild re-embeds everything even though nothing changed | The vector cache starts empty for a model that has never been used, and is discarded if the same model's export or vector width changes. Switching between models does not reset either one's cache. |
 | Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |
 | **Unload Model** says a reindex is running | Deliberate - see [Freeing the memory again](#freeing-the-memory-again). Cancel the task on the Scheduled Tasks page if you mean it, or wait. |
+| Vectors look wrong and a rebuild keeps reusing them | Press **Clear Vector Cache**, then run **Rebuild Meilisearch Index**. |
 | Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. Each model caches into its own subdirectory there, so an old model's cache can be deleted on its own. |
 
 ## REST API
@@ -511,6 +519,7 @@ All endpoints require an authenticated administrator and back the config page.
 | `GET` | `/Plugins/Meilisearch/Stats` | Document count, index size, indexing state, field distribution, health, authentication state, last incremental sync timestamp, matching strategy in use, average search latency, embedding model and state |
 | `GET` | `/Plugins/Meilisearch/EmbeddingModels` | The embedding models this build can run, as offered by the model picker |
 | `POST` | `/Plugins/Meilisearch/UnloadEmbeddingModel` | Releases the model from memory. Answers with the outcome - `Unloaded`, `NotLoaded`, or `409` with `ReindexRunning` / `Busy` |
+| `POST` | `/Plugins/Meilisearch/ClearVectorCache` | Discards every cached vector. Answers with the outcome and how many were dropped - `Cleared`, `Empty`, `Failed`, or `409` with `ReindexRunning` / `Busy` |
 | `POST` | `/Plugins/Meilisearch/TestConnection` | Reachability and API-key validation |
 | `POST` | `/Plugins/Meilisearch/Reconnect` | Drops the connection, dials again, and reports the resulting state |
 | `POST` | `/Plugins/Meilisearch/Reindex` | Queues the **Rebuild Meilisearch Index** task |
@@ -522,7 +531,7 @@ All endpoints require an authenticated administrator and back the config page.
 - **MeilisearchIndexService** - Hosted service running a bounded, debounced, coalescing sync queue with pause/resume support
 - **SyncQueuePersistence** - Persists pending sync ops across plugin restarts
 - **MeilisearchHealthMonitor** - Hosted service that periodically pings Meilisearch and pauses sync when unreachable
-- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/EmbeddingModels`, `/UnloadEmbeddingModel`, `/TestConnection`, `/Reconnect`, `/Reindex`) backing the config page
+- **MeilisearchController** - REST endpoints (`/Plugins/Meilisearch/Stats`, `/EmbeddingModels`, `/UnloadEmbeddingModel`, `/ClearVectorCache`, `/TestConnection`, `/Reconnect`, `/Reindex`) backing the config page
 - **ReindexTask** - Scheduled task for full library reindexing
 - **IncrementalReindexTask** - Hourly scheduled task syncing items modified since the last run
 - **LibraryScanSyncTask** - Post-scan hook that runs the incremental sync once a library scan finishes

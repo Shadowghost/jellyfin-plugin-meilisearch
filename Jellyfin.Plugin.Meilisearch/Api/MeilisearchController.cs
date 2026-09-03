@@ -137,6 +137,24 @@ public class MeilisearchController : ControllerBase
     }
 
     /// <summary>
+    /// Discards every cached vector, so the next rebuild computes them again.
+    /// </summary>
+    /// <response code="200">The cache was cleared, or there was nothing to clear.</response>
+    /// <response code="409">A reindex is running, or the model is still loading; nothing was cleared.</response>
+    /// <returns>What happened, and how many vectors were discarded.</returns>
+    [HttpPost("ClearVectorCache")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public ActionResult<ClearCacheResult> ClearVectorCache()
+    {
+        var result = _embeddings.ClearVectorCache();
+
+        return result.Outcome is ClearCacheOutcome.ReindexRunning or ClearCacheOutcome.Busy
+            ? Conflict(result)
+            : Ok(result);
+    }
+
+    /// <summary>
     /// Determines whether the index was last built with a different embedding model than the one now
     /// selected, which leaves semantic search keyword-only until a rebuild.
     /// </summary>

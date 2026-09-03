@@ -252,6 +252,17 @@
                         it still has to index without a vector, and a rebuild is meant to embed all of them or none.
                         Cancel the task on the Scheduled Tasks page first if you mean it.
                     </div>
+                    <div style="margin-bottom: 1em;">
+                        <button is="emby-button" type="button" id="clearVectorCacheBtn" class="raised"><span>Clear Vector Cache</span></button>
+                        <span id="clearVectorCacheStatus" style="margin-left: 1em;"></span>
+                    </div>
+                    <div class="fieldDescription" style="margin-bottom: 1em;">
+                        Throws away every cached vector so the next rebuild computes them from scratch. Changing the
+                        model or the token budget already does this on its own &mdash; reach for this when the vectors
+                        look wrong rather than merely stale, since every one it drops costs a forward pass to produce
+                        again, which is hours for a large library. The index keeps the vectors it already holds until
+                        you rebuild. Refused while a reindex is running.
+                    </div>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
                         <strong>After enabling this or changing the model, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong>
                         Vectors are written as items are indexed, so existing documents have none until you rebuild.
@@ -797,6 +808,73 @@
 
                             var reason = error && (error.statusText || error.message);
                             show(null, 'Could not unload the model' + (reason ? ': ' + reason : '.'), 'red');
+                        });
+                });
+
+            // Same shape as the unload endpoint: 200 for Cleared/Empty/Failed, 409 for the refusals.
+            var CLEAR_CACHE_MESSAGES = {
+                Empty: ['Nothing was cached, so there was nothing to clear.', ''],
+                ReindexRunning: ['A reindex is running and is reading and writing the cache as it goes, so nothing was cleared - cancel the task on the Scheduled Tasks page, or wait for it to finish.', 'orange'],
+                Busy: ['The model is still downloading or loading, which is when the cache is opened. Nothing was cleared; try again once it has finished.', 'orange'],
+                Failed: ['The cache files could not be removed; the server log says why.', 'red']
+            };
+
+            document.querySelector('#clearVectorCacheBtn')
+                .addEventListener('click', function () {
+                    var statusSpan = document.querySelector('#clearVectorCacheStatus');
+
+                    if (!confirm('Discard every cached vector? The next rebuild has to compute them again, which takes hours for a large library.')) {
+                        return;
+                    }
+
+                    statusSpan.textContent = 'Clearing...';
+                    statusSpan.style.color = '';
+
+                    function show(result, fallback, fallbackColor) {
+                        var outcome = result ? pick(result, 'Outcome') : null;
+                        var known = CLEAR_CACHE_MESSAGES[outcome];
+
+                        if (outcome === 'Cleared') {
+                            var cleared = pick(result, 'Cleared');
+                            statusSpan.textContent = cleared
+                                ? 'Discarded ' + formatNumber(cleared) + ' vectors. Run a rebuild to put fresh ones in the index.'
+                                : 'Vector cache cleared. Run a rebuild to put fresh ones in the index.';
+                            statusSpan.style.color = 'green';
+                        } else if (known) {
+                            statusSpan.textContent = known[0];
+                            statusSpan.style.color = known[1];
+                        } else {
+                            statusSpan.textContent = fallback;
+                            statusSpan.style.color = fallbackColor;
+                        }
+
+                        refreshStatus();
+                    }
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('Plugins/Meilisearch/ClearVectorCache'),
+                        dataType: 'json'
+                    })
+                        .then(function (result) {
+                            show(result, 'Done.', '');
+                        })
+                        .catch(function (error) {
+                            // A refusal is a 409 whose body is the result, and ApiClient rejects with
+                            // the raw fetch Response - so it has to be read back out of it.
+                            if (error && typeof error.json === 'function') {
+                                error.json()
+                                    .then(function (result) {
+                                        show(result, 'Could not clear the vector cache.', 'red');
+                                    })
+                                    .catch(function () {
+                                        show(null, 'Could not clear the vector cache.', 'red');
+                                    });
+                                return;
+                            }
+
+                            var reason = error && (error.statusText || error.message);
+                            show(null, 'Could not clear the vector cache' + (reason ? ': ' + reason : '.'), 'red');
                         });
                 });
 

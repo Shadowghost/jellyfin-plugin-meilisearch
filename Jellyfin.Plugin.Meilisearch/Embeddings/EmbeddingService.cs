@@ -790,6 +790,102 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     /// <returns>What happened.</returns>
     public UnloadOutcome RequestUnload() => RequestUnload("on request");
 
+    /// <summary>
+    /// Discards every cached vector for the selected model.
+    /// </summary>
+    /// <returns>What happened, and how many vectors were discarded.</returns>
+    /// <remarks>
+    /// The index keeps the vectors it already holds; this only stops the next rebuild from handing
+    /// them straight back. Changing the model or the token budget invalidates the cache on its own -
+    /// this is for the case where the vectors are suspect rather than stale, and every one it drops
+    /// costs a forward pass to produce again.
+    /// </remarks>
+    public ClearCacheResult ClearVectorCache()
+    {
+        // Same refusals as an unload: a reindex reads and writes the cache throughout, and clearing
+        // it underneath one would have half the library embedded against a file that is being
+        // truncated as it goes.
+        if (!ReindexCoordinator.Gate.Wait(0))
+        {
+            _logger.LogInformation("Refusing to clear the vector cache: a reindex is running");
+            return new ClearCacheResult(ClearCacheOutcome.ReindexRunning, 0);
+        }
+
+        try
+        {
+            if (!_initLock.Wait(0))
+            {
+                _logger.LogInformation("Refusing to clear the vector cache: the model is still downloading or loading");
+                return new ClearCacheResult(ClearCacheOutcome.Busy, 0);
+            }
+
+            try
+            {
+                if (_cache is { } cache)
+                {
+                    var cleared = cache.Clear();
+                    return new ClearCacheResult(
+                        cleared == 0 ? ClearCacheOutcome.Empty : ClearCacheOutcome.Cleared,
+                        cleared);
+                }
+
+                // Nothing is open - semantic search is off, the model is unloaded, or caching is
+                // disabled - so the files are unlocked and deleting them is the whole job.
+                return DeleteCacheFiles();
+            }
+            finally
+            {
+                _initLock.Release();
+            }
+        }
+        finally
+        {
+            ReindexCoordinator.Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Removes the cache files of the selected model from disk. Only valid while nothing holds them
+    /// open, since they are opened with <see cref="FileShare.None"/>.
+    /// </summary>
+    private ClearCacheResult DeleteCacheFiles()
+    {
+        var directory = Path.Combine(GetCacheRootDirectory(), ActiveModel.Id);
+
+        try
+        {
+            if (!Directory.Exists(directory))
+            {
+                return new ClearCacheResult(ClearCacheOutcome.Empty, 0);
+            }
+
+            var removed = false;
+            foreach (var name in new[] { EmbeddingCache.KeysFileName, EmbeddingCache.VectorsFileName })
+            {
+                var path = Path.Combine(directory, name);
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                    removed = true;
+                }
+            }
+
+            if (removed)
+            {
+                _logger.LogInformation("Deleted the vector cache in {Directory}", directory);
+            }
+
+            return new ClearCacheResult(removed ? ClearCacheOutcome.Cleared : ClearCacheOutcome.Empty, 0);
+        }
+#pragma warning disable CA1031 // A cache that will not delete is reported back, not thrown at the caller.
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not delete the vector cache in {Directory}", directory);
+            return new ClearCacheResult(ClearCacheOutcome.Failed, 0);
+        }
+#pragma warning restore CA1031
+    }
+
     private UnloadOutcome RequestUnload(string reason)
     {
         // Held for the whole operation rather than merely sampled, so a reindex cannot start between
