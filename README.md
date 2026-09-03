@@ -167,8 +167,9 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Download the model automatically | `true` | Fetch the embedding model as soon as semantic search is enabled |
 | Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning |
 | Max Tokens per Item | `256` | How much of each item's metadata is embedded |
-| Embedding Batch Size | `8` | Items per inference pass |
 | Inference Threads | `0` | 0 uses half the available CPU cores |
+| ONNX Runtime Library Path | (empty) | An alternative ONNX Runtime, for running inference on a GPU |
+| Release Model When Idle | `5` | Minutes without a vector request before the model is released; `0` keeps it loaded |
 | Compress stored vectors | `true` | Binary quantization: 32x smaller in Meilisearch, at some ranking precision |
 | Cache computed vectors on disk | `true` | Reuse vectors across rebuilds instead of recomputing them |
 | Cache Size Limit | `0` | Cap on cached vectors; `0` is unlimited |
