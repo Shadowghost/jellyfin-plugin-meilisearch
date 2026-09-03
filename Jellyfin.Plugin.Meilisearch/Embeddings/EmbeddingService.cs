@@ -99,6 +99,12 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     public static int Dimensions => ActiveModel.Dimensions;
 
     /// <summary>
+    /// Gets the token budget actually used per text, with the configured value brought into a range
+    /// the model can run.
+    /// </summary>
+    public static int EffectiveMaxTokens => Math.Clamp(Configuration.EmbeddingMaxTokens, 16, 8192);
+
+    /// <summary>
     /// Gets a value indicating whether semantic search is switched on in the configuration.
     /// </summary>
     public bool IsEnabled => Configuration.EnableSemanticSearch;
@@ -909,7 +915,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return new float[texts.Count][];
         }
 
-        var maxTokens = Math.Clamp(Configuration.EmbeddingMaxTokens, 16, 8192);
+        var maxTokens = EffectiveMaxTokens;
 
         try
         {
@@ -945,6 +951,14 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 #pragma warning restore CA1031
     }
 
+    /// <summary>
+    /// Identifies what is loaded, so a configuration change that invalidates it forces a reload.
+    /// </summary>
+    /// <remarks>
+    /// The token budget is part of it so that changing it reopens the cache, which is what discards
+    /// the vectors the old budget produced. Without that the next rebuild would hand back exactly
+    /// the vectors the change was meant to replace.
+    /// </remarks>
     private static string BuildKey(EmbeddingModelDescriptor descriptor)
         => string.Join(
             '|',
@@ -953,7 +967,8 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             Configuration.EmbeddingThreads.ToString(CultureInfo.InvariantCulture),
             Configuration.EmbeddingOnnxRuntimePath,
             Configuration.EnableEmbeddingCache ? "cache" : "nocache",
-            Configuration.EmbeddingCacheMaxEntries.ToString(CultureInfo.InvariantCulture));
+            Configuration.EmbeddingCacheMaxEntries.ToString(CultureInfo.InvariantCulture),
+            EffectiveMaxTokens.ToString(CultureInfo.InvariantCulture));
 
     private void OnConfigurationChanged(object? sender, BasePluginConfiguration configuration)
     {
@@ -1012,6 +1027,9 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             CancellationToken.None);
     }
 
+    private string GetCacheRootDirectory()
+        => Path.Combine(_applicationPaths.DataPath, "meilisearch-embedding-cache");
+
     private EmbeddingCache? OpenCache(EmbeddingModelDefinition definition)
     {
         if (!Configuration.EnableEmbeddingCache)
@@ -1019,13 +1037,13 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return null;
         }
 
-        var root = Path.Combine(_applicationPaths.DataPath, "meilisearch-embedding-cache");
+        var root = GetCacheRootDirectory();
         var directory = Path.Combine(root, definition.Id);
         EmbeddingStorageMigration.MigrateVectorCache(definition.Id, root, directory, _logger);
 
         return EmbeddingCache.Open(
             directory,
-            definition.Fingerprint,
+            string.Create(CultureInfo.InvariantCulture, $"{definition.Fingerprint}|tokens={EffectiveMaxTokens}"),
             definition.Dimensions,
             Math.Max(0, Configuration.EmbeddingCacheMaxEntries),
             _logger);

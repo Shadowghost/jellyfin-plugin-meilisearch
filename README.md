@@ -167,7 +167,7 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Download the model automatically | `true` | Fetch the embedding model as soon as semantic search is enabled |
 | Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning. Above ~60 a similar item outranks an exact title (see [Tuning](#tuning)) |
 | Minimum Semantic Score | `0` | Score a match has to reach to be returned at all; `0` disables the floor |
-| Max Tokens per Item | `256` | How much of each item's metadata is embedded |
+| Max Tokens per Item | `256` | How much of each item's metadata is embedded. Changing it discards the vector cache and needs a rebuild |
 | Inference Threads | `0` | 0 uses half the available CPU cores |
 | ONNX Runtime Library Path | (empty) | An alternative ONNX Runtime, for running inference on a GPU |
 | Release Model When Idle | `5` | Minutes without a vector request before the model is released; `0` keeps it loaded |
@@ -378,7 +378,10 @@ it re-uploads rather than re-running the model.
 **Max Tokens per Item** trades indexing time for context. The embedded text is ordered
 title → series/album → artists → type → year → genres → studios → tags → people → tagline →
 overview, and truncation drops from the end, so a low value keeps the identifying fields and gives
-up the overview.
+up the overview. **Changing it discards the vector cache**: the budget is part of the cache's
+identity, because a vector computed under one is not the vector the next would produce, and without
+that a rebuild after the change would hand back exactly the vectors the change was meant to replace.
+The index keeps its old vectors until you run **Rebuild Meilisearch Index**.
 
 > **The list of models is fixed, by design.** The tokenizer, the vector width, the key/value head
 > geometry, the pooling and the query instruction prefix are all part of a model, not settings around
@@ -492,6 +495,7 @@ again; nothing is lost either way.
 | Status shows `Model not downloaded` | Automatic download is off. Run the **Download Meilisearch Embedding Model** task. |
 | Semantic search is `Ready` but results are unchanged | The existing documents have no vectors yet. Run **Rebuild Meilisearch Index**. |
 | Searching the first words of a title no longer finds it | **Semantic Ratio** is at or above ~60, where a merely similar item outranks an exact keyword match. Lower it to around 50 - see [Tuning](#tuning). |
+| A rebuild after changing **Max Tokens per Item** produced the same vectors | Fixed: the token budget is part of the vector cache's identity, so changing it starts a new cache. On an older build, press **Clear Vector Cache** before rebuilding. |
 | Registering the embedder failed | Vector search needs Meilisearch 1.10 or newer. Older servers keep working as keyword-only. |
 | A rebuild re-embeds everything even though nothing changed | The vector cache starts empty for a model that has never been used, and is discarded if the same model's export or vector width changes. Switching between models does not reset either one's cache. |
 | Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |

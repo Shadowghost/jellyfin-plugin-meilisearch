@@ -133,7 +133,11 @@ internal sealed class EmbeddingCache : IDisposable
     /// Opens - creating or resetting as needed - the cache for a given model.
     /// </summary>
     /// <param name="directory">The directory the cache files live in.</param>
-    /// <param name="fingerprint">Identifies the model whose vectors these are. A change discards the cache.</param>
+    /// <param name="fingerprint">
+    /// Identifies everything besides the text that decides what vector comes out - the model and the
+    /// token budget it was run under. A change discards the cache, since the stored vectors are no
+    /// longer the ones this configuration would produce.
+    /// </param>
     /// <param name="dimensions">The width of the stored vectors.</param>
     /// <param name="maxEntries">The maximum number of entries to store, or zero for no limit.</param>
     /// <param name="logger">The logger.</param>
