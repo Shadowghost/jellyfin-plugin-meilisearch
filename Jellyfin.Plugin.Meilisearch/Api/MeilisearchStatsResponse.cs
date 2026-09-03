@@ -26,7 +26,7 @@ namespace Jellyfin.Plugin.Meilisearch.Api;
 /// <param name="EmbeddingAvailableProviders">Every execution provider the loaded ONNX Runtime offers, so the settings page can say why a GPU choice did not take effect.</param>
 /// <param name="EmbeddingQueryTimeMilliseconds">Rolling average time spent embedding a search query, or null before the first one. Part of, not additional to, <paramref name="AverageSearchTimeMilliseconds"/>.</param>
 /// <param name="EmbeddingQueryCacheHitRate">Share of query embeddings served from the in-memory query vector cache, 0.0-1.0, or null before the first query.</param>
-/// <param name="SemanticRatioEffective">Whether the configured semantic ratio is high enough for a query vector to affect the ranking. When false, queries are not embedded at all.</param>
+/// <param name="SemanticRatioBalanced">Whether the configured semantic ratio still leaves exact keyword matches on top. When false, a merely similar item outranks the title someone typed.</param>
 /// <param name="MatchingStrategy">The Meilisearch matching strategy queries are currently sent with.</param>
 /// <param name="AverageSearchTimeMilliseconds">Rolling average time of a whole search, embedding included, or null before the first search.</param>
 /// <param name="SearchCount">Number of search requests issued since startup.</param>
@@ -51,7 +51,7 @@ public sealed record MeilisearchStatsResponse(
     IReadOnlyCollection<string>? EmbeddingAvailableProviders,
     double? EmbeddingQueryTimeMilliseconds,
     double? EmbeddingQueryCacheHitRate,
-    bool SemanticRatioEffective,
+    bool SemanticRatioBalanced,
     string MatchingStrategy,
     double? AverageSearchTimeMilliseconds,
     long SearchCount);
