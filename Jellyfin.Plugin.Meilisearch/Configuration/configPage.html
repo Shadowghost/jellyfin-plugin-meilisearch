@@ -264,8 +264,12 @@
                         you rebuild. Refused while a reindex is running.
                     </div>
                     <div class="fieldDescription" style="margin-bottom: 1em;">
-                        <strong>After enabling this or changing the model, run &ldquo;Rebuild Meilisearch Index&rdquo;.</strong>
-                        Vectors are written as items are indexed, so existing documents have none until you rebuild.
+                        <strong>These settings only reach the index through a rebuild.</strong> Turning semantic search
+                        on, switching model, changing <em>Max Tokens per Item</em> or toggling
+                        <em>Compress stored vectors</em> all change what is stored per document, and documents already
+                        in the index keep what they have until you run &ldquo;Rebuild Meilisearch Index&rdquo;.
+                        <em>Semantic Ratio</em> and the two score floors are applied per search and take effect as soon
+                        as you save.
                     </div>
                     <br />
                     <div style="margin-bottom: 1em;">
