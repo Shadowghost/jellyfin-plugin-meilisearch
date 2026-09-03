@@ -236,7 +236,12 @@ public class MeilisearchDocument
     /// Gets or sets the ranking score returned by Meilisearch search.
     /// This property is populated only during search operations.
     /// </summary>
+    /// <remarks>
+    /// Omitted when writing: it is a search response field, and sending it back would store a null
+    /// <c>_rankingScore</c> on every document in the index.
+    /// </remarks>
     [JsonPropertyName("_rankingScore")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? RankingScore { get; set; }
 
     /// <summary>
