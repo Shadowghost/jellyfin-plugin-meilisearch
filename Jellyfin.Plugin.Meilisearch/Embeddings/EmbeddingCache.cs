@@ -50,6 +50,7 @@ internal sealed class EmbeddingCache : IDisposable
     private readonly int _dimensions;
     private readonly int _recordSize;
     private readonly int _maxEntries;
+    private readonly long _fingerprint;
 
     // Guards every field below it as well as both file handles: appends have to keep the two files
     // in step, and a retention rewrite replaces them wholesale.
@@ -72,6 +73,7 @@ internal sealed class EmbeddingCache : IDisposable
         string directory,
         int dimensions,
         int maxEntries,
+        long fingerprint,
         SafeFileHandle keysHandle,
         SafeFileHandle vectorsHandle,
         Dictionary<CacheKey, int> index)
@@ -81,6 +83,7 @@ internal sealed class EmbeddingCache : IDisposable
         _dimensions = dimensions;
         _recordSize = dimensions * sizeof(float);
         _maxEntries = maxEntries;
+        _fingerprint = fingerprint;
         _keysHandle = keysHandle;
         _vectorsHandle = vectorsHandle;
         _index = index;
@@ -201,7 +204,15 @@ internal sealed class EmbeddingCache : IDisposable
                 index.Count.ToString(CultureInfo.InvariantCulture),
                 directory);
 
-            var cache = new EmbeddingCache(logger, directory, dimensions, maxEntries, keysHandle, vectorsHandle, index);
+            var cache = new EmbeddingCache(
+                logger,
+                directory,
+                dimensions,
+                maxEntries,
+                fingerprintHash,
+                keysHandle,
+                vectorsHandle,
+                index);
             keysHandle = null;
             vectorsHandle = null;
             return cache;
@@ -335,6 +346,43 @@ internal sealed class EmbeddingCache : IDisposable
             {
                 FlushCore();
             }
+        }
+    }
+
+    /// <summary>
+    /// Discards every stored vector, leaving an empty cache in place.
+    /// </summary>
+    /// <returns>The number of vectors that were discarded.</returns>
+    /// <remarks>
+    /// Truncates rather than deletes, so the open handles stay valid and the next lookup simply
+    /// misses. Every vector this drops costs a forward pass to produce again.
+    /// </remarks>
+    public int Clear()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return 0;
+            }
+
+            var cleared = _count;
+
+            Reset(_keysHandle, _vectorsHandle, _fingerprint, _dimensions);
+
+            _index.Clear();
+            _retained?.Clear();
+            _count = 0;
+            _appendsSinceFlush = 0;
+            _warnedFull = false;
+            FlushCore();
+
+            _logger.LogInformation(
+                "Discarded {Count} vectors from the embedding cache in {Directory}",
+                cleared.ToString(CultureInfo.InvariantCulture),
+                _directory);
+
+            return cleared;
         }
     }
 
@@ -548,8 +596,7 @@ internal sealed class EmbeddingCache : IDisposable
         using (var keysTemp = File.OpenHandle(keysTempPath, FileMode.Create, FileAccess.Write, FileShare.None))
         using (var vectorsTemp = File.OpenHandle(vectorsTempPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            TryReadHeader(_keysHandle, out _, out _, out var fingerprint);
-            Reset(keysTemp, vectorsTemp, fingerprint, _dimensions);
+            Reset(keysTemp, vectorsTemp, _fingerprint, _dimensions);
 
             var vector = new byte[_recordSize];
             Span<byte> keyBytes = stackalloc byte[KeySize];
