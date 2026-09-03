@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Shadowghost/jellyfin-plugin-meilisearch/refs/heads/unstable/images/jellyfin-plugin-meilisearch.png",
     "versions": [
       {
+        "version": "2026.9.3.1017",
+        "changelog": "Initial release with search provider, real-time sync, and reindex task. Optional semantic search using a locally run Qwen3-Embedding-0.6B model, disabled by default.\n",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.09.03.1017-adc8863/meilisearch_2026.9.3.1017.zip",
+        "checksum": "ac53475fc80afda08c4f522da8a7a9e5",
+        "timestamp": "2026-09-03T10:17:32Z"
+      },
+      {
         "version": "2026.9.2.948",
         "changelog": "Initial release with search provider, real-time sync, and reindex task. Optional semantic search using a locally run Qwen3-Embedding-0.6B model, disabled by default.\n",
         "targetAbi": "12.0.0.0",
@@ -79,14 +87,6 @@
         "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.08.08.0859-c1276d9/meilisearch_2026.8.8.859.zip",
         "checksum": "7d36aa56766624d5153f2e52d1b396e6",
         "timestamp": "2026-08-08T08:59:26Z"
-      },
-      {
-        "version": "2026.7.24.547",
-        "changelog": "Initial release with search provider, real-time sync, and reindex task.\n",
-        "targetAbi": "12.0.0.0",
-        "sourceUrl": "https://github.com/Shadowghost/jellyfin-plugin-meilisearch/releases/download/unstable-2026.07.24.0547-98657a9/meilisearch_2026.7.24.547.zip",
-        "checksum": "181dcc5408db9df8dc909f4e7ccbb5e8",
-        "timestamp": "2026-07-24T05:47:55Z"
       }
     ]
   }
