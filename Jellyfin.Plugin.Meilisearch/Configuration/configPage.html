@@ -168,7 +168,13 @@
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
-                        <div class="fieldDescription">How much of each item's metadata is embedded. Higher is slower. Default: 256</div>
+                        <div class="fieldDescription">
+                            How much of each item's metadata is embedded. Higher is slower. Default: 256
+                            <br /><br />
+                            <strong>Changing this discards the vector cache and needs a full rebuild.</strong> A vector
+                            computed under one budget is not the one the next budget produces, so the cache starts over
+                            rather than handing the old vectors back, and the index keeps what it has until you rebuild.
+                        </div>
                     </div>
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />

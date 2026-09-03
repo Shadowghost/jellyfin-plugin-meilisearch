@@ -228,6 +228,11 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the maximum number of tokens embedded per item. Library metadata is short, and
     /// this caps the cost of the long overviews that dominate inference time.
     /// </summary>
+    /// <remarks>
+    /// Part of the vector cache's identity: a vector computed under one budget is not the vector the
+    /// next budget would produce, so changing this starts a new cache rather than handing back what
+    /// the old setting produced. The index keeps its old vectors until a full rebuild.
+    /// </remarks>
     public int EmbeddingMaxTokens { get; set; }
 
     /// <summary>
