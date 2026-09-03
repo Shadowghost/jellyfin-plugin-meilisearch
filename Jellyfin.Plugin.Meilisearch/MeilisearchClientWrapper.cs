@@ -62,6 +62,9 @@ public class MeilisearchClientWrapper : IDisposable
     private double _averageSearchMilliseconds;
     private long _searchCount;
 
+    // Set while a rebuild is building into a second index, which is where writes go until the swap.
+    private volatile string? _rebuildIndexName;
+
     private volatile global::Meilisearch.Index? _cachedIndex;
     private volatile string? _cachedIndexKey;
     private volatile string? _settingsAppliedKey;
@@ -335,7 +338,7 @@ public class MeilisearchClientWrapper : IDisposable
             return await ExecuteWithReconnectRetryAsync<int?>(
                 async ct =>
                 {
-                    var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                    var index = await GetWriteIndexAsync(ct).ConfigureAwait(false);
                     var task = await index.AddDocumentsAsync([document], cancellationToken: ct).ConfigureAwait(false);
                     _logger.LogDebug("Indexed document {Id} ({Name})", document.Id, document.Name);
 
@@ -372,7 +375,7 @@ public class MeilisearchClientWrapper : IDisposable
                 lastTaskUid = await ExecuteWithReconnectRetryAsync<int?>(
                     async ct =>
                     {
-                        var index = await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+                        var index = await GetWriteIndexAsync(ct).ConfigureAwait(false);
                         var task = await index.AddDocumentsAsync(chunk, cancellationToken: ct).ConfigureAwait(false);
                         _logger.LogDebug("Indexed {Count} documents", chunk.Count);
 
@@ -571,42 +574,120 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Deletes and recreates the index.
+    /// Prepares the index a full rebuild writes into, and directs writes there.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task representing the operation.</returns>
-    public async Task ResetIndexAsync(CancellationToken cancellationToken)
+    /// <returns>The name of the index the rebuild will populate.</returns>
+    /// <remarks>
+    /// A rebuild is never written into the live index. Emptying it first would mean hours of no
+    /// search results on a large library, so the replacement is built beside it and swapped in by
+    /// <see cref="CommitRebuildAsync"/> once every document has been accepted. The staging index is
+    /// created empty and fully configured, so the swap puts a complete index live in one step, and
+    /// anything left over from an interrupted rebuild is dropped first: it holds a partial library,
+    /// and continuing into it would leave documents no longer in the library behind.
+    /// </remarks>
+    public async Task<string> BeginRebuildAsync(CancellationToken cancellationToken)
     {
-        if (!IsConfigured)
-        {
-            return;
-        }
+        _rebuildIndexName = null;
+
+        // Named after the live index so it is obvious what it belongs to, and so a leftover from
+        // an interrupted run is recognisable rather than mysterious.
+        var staging = Configuration.IndexName + "_rebuild";
 
         await ExecuteWithReconnectRetryAsync(
             async ct =>
             {
                 var client = GetClient();
-                var indexName = Configuration.IndexName;
 
-                try
-                {
-                    _logger.LogInformation("Deleting Meilisearch index {IndexName}", indexName);
-                    var deleteTask = await client.DeleteIndexAsync(indexName, ct).ConfigureAwait(false);
-                    await client.WaitForTaskAsync(deleteTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, ct).ConfigureAwait(false);
-                }
-                catch (MeilisearchApiError ex) when (ex.Code == "index_not_found")
-                {
-                    _logger.LogDebug("Index {IndexName} does not exist, nothing to delete", indexName);
-                }
+                await DeleteIndexIfPresentAsync(client, staging, ct).ConfigureAwait(false);
 
-                // Invalidate caches so the next access re-applies settings.
-                InvalidateIndexCache();
+                _logger.LogInformation("Building the rebuild into {IndexName}; the live index keeps serving searches", staging);
+                var createTask = await client.CreateIndexAsync(staging, "id", ct).ConfigureAwait(false);
+                await client.WaitForTaskAsync(createTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, ct).ConfigureAwait(false);
 
-                // Recreate the index.
-                await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
-                _logger.LogInformation("Recreated Meilisearch index {IndexName}", indexName);
+                await ConfigureIndexSettingsAsync(client.Index(staging), isNewIndex: true, ct).ConfigureAwait(false);
             },
             cancellationToken).ConfigureAwait(false);
+
+        _rebuildIndexName = staging;
+        return staging;
+    }
+
+    /// <summary>
+    /// Puts a finished rebuild live, swapping the staging index with the one searches use and
+    /// dropping what it replaced.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A task representing the operation.</returns>
+    /// <remarks>
+    /// A swap is atomic from a searcher's point of view: queries answered before it see the old
+    /// index, queries after it the new one, and none of them see an empty one.
+    /// </remarks>
+    public async Task CommitRebuildAsync(CancellationToken cancellationToken)
+    {
+        var staging = _rebuildIndexName;
+        if (staging is null)
+        {
+            return;
+        }
+
+        var live = Configuration.IndexName;
+
+        await ExecuteWithReconnectRetryAsync(
+            async ct =>
+            {
+                var client = GetClient();
+
+                // A swap needs both sides to exist; on a first run there is no live index yet.
+                await GetOrCreateIndexAsync(ct).ConfigureAwait(false);
+
+                var swapTask = await client.SwapIndexesAsync([new IndexSwap(live, staging, false)], ct).ConfigureAwait(false);
+                await client.WaitForTaskAsync(swapTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, ct).ConfigureAwait(false);
+
+                _logger.LogInformation("Swapped the rebuilt index into {IndexName}", live);
+
+                // Now holding what used to be live.
+                await DeleteIndexIfPresentAsync(client, staging, ct).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        _rebuildIndexName = null;
+
+        // The handle names an index whose contents were replaced underneath it; drop it so the next
+        // access re-reads the settings that came across with the swap.
+        InvalidateIndexCache();
+    }
+
+    /// <summary>
+    /// Discards a rebuild that did not finish, leaving the live index untouched.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A task representing the operation.</returns>
+    public async Task AbandonRebuildAsync(CancellationToken cancellationToken)
+    {
+        var staging = _rebuildIndexName;
+        _rebuildIndexName = null;
+
+        if (staging is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await ExecuteWithReconnectRetryAsync(
+                async ct =>
+                {
+                    _logger.LogInformation("Discarding the unfinished rebuild in {IndexName}", staging);
+                    await DeleteIndexIfPresentAsync(GetClient(), staging, ct).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Worth a line but not worth failing on: the next rebuild deletes it before it starts.
+            _logger.LogWarning(ex, "Could not remove the unfinished rebuild index {IndexName}", staging);
+        }
     }
 
     /// <summary>
@@ -1085,6 +1166,41 @@ public class MeilisearchClientWrapper : IDisposable
         finally
         {
             _clientLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Gets the index documents are written to: the staging index while a zero-downtime rebuild is
+    /// in progress, otherwise the live one.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The index to write to.</returns>
+    /// <remarks>
+    /// Only writes are routed. Searches stay on the live index throughout, which is the whole point
+    /// of building the replacement beside it.
+    /// </remarks>
+    private async Task<global::Meilisearch.Index> GetWriteIndexAsync(CancellationToken cancellationToken)
+    {
+        // Index(uid) only names the index rather than fetching it, so this costs no round trip per
+        // batch. The staging index was created and configured by BeginRebuildAsync.
+        if (_rebuildIndexName is { } staging)
+        {
+            return GetClient().Index(staging);
+        }
+
+        return await GetOrCreateIndexAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DeleteIndexIfPresentAsync(MeilisearchClient client, string indexName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var task = await client.DeleteIndexAsync(indexName, cancellationToken).ConfigureAwait(false);
+            await client.WaitForTaskAsync(task.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken).ConfigureAwait(false);
+        }
+        catch (MeilisearchApiError ex) when (ex.Code == "index_not_found")
+        {
+            _logger.LogDebug("Index {IndexName} does not exist, nothing to delete", indexName);
         }
     }
 

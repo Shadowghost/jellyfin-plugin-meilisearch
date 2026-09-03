@@ -409,8 +409,17 @@ After configuring the plugin, run a full reindex:
 
 The task fetches only indexable item types from the database, pushes them in configurable
 batches (default 2,000) with bounded parallelism, awaits Meilisearch task completion before
-reporting success, and pauses real-time sync while running so the freshly reset index
-doesn't race with incoming events.
+reporting success, and pauses real-time sync while running so incoming events don't race it.
+
+**The live index is never emptied.** The task builds into a second index named after yours with
+`_rebuild` appended and swaps the two in a single Meilisearch operation once every document has been
+accepted, then deletes what it replaced. Searches are answered from the old index until the swap and
+from the new one after it, never from an empty one - which matters because a rebuild with semantic
+search on takes hours. A run that is cancelled or fails drops the half-built index and leaves the old
+one serving; the next rebuild starts from a fresh staging index either way.
+
+Two consequences worth knowing: Meilisearch needs room for both copies until the swap, and the
+**API Key** needs permission to swap indexes as well as to write documents and settings.
 
 ### Incremental Sync
 
@@ -491,7 +500,7 @@ again; nothing is lost either way.
 | No results, or results identical to stock Jellyfin | The index is empty and search fell back to the SQL provider. Run **Rebuild Meilisearch Index** and check the document count in the **Status** panel. |
 | Parent-scoped or media-type-scoped searches miss items | Stale document schema - see [Upgrading](#upgrading). |
 | Results stop updating after adding media | Real-time sync is disabled, or the health monitor paused it because Meilisearch is unreachable. The log records both. Sync resumes automatically once the server returns. |
-| Test Connection reports reachable but not authenticated | The **API Key** is wrong or lacks permission. A master key or a key with search + documents + settings + tasks access is required. |
+| Test Connection reports reachable but not authenticated | The **API Key** is wrong or lacks permission. A master key or a key with search + documents + settings + tasks + indexes access is required - a rebuild creates, swaps and deletes indexes. |
 | Meilisearch was restarted / its container was recreated | Handled automatically: on a communication failure the plugin rebuilds its HTTP client (clearing the pooled connection and cached DNS entry) and retries once. No Jellyfin restart needed. |
 | Fewer results than expected for a fuzzy query | Lower **Minimum Match Score**. It maps to Meilisearch's `rankingScoreThreshold`, so raising it buys precision at the cost of recall. |
 | Too many loosely related results | Set **Matching Strategy** to `all`, which returns only items matching every word of the query. |
@@ -508,6 +517,7 @@ again; nothing is lost either way.
 | Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |
 | **Unload Model** says a reindex is running | Deliberate - see [Freeing the memory again](#freeing-the-memory-again). Cancel the task on the Scheduled Tasks page if you mean it, or wait. |
 | Vectors look wrong and a rebuild keeps reusing them | Press **Clear Vector Cache**, then run **Rebuild Meilisearch Index**. |
+| Meilisearch holds an index named `<yours>_rebuild` | A rebuild was interrupted. It is harmless; the next rebuild deletes it before it starts, or you can delete it yourself. |
 | Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. Each model caches into its own subdirectory there, so an old model's cache can be deleted on its own. |
 
 ## REST API

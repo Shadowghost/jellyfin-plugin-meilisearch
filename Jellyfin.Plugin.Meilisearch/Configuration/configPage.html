@@ -297,6 +297,13 @@
                         scheduled task, so you can follow its progress - and cancel it - on the
                         Scheduled Tasks page.
                     </p>
+                    <p class="fieldDescription">
+                        The replacement is built in a second index &mdash; your index name with
+                        <code>_rebuild</code> appended &mdash; and swapped in once every document has been accepted,
+                        so searches keep working throughout and a run that is cancelled or fails leaves the previous
+                        index serving. Meilisearch therefore needs room for both copies until the swap, and the API
+                        key needs permission to swap indexes.
+                    </p>
                     <button is="emby-button" type="button" id="reindexBtn" class="raised"><span>Rebuild Index</span></button>
                     <span id="reindexStatus" style="margin-left: 1em;"></span>
                 </div>

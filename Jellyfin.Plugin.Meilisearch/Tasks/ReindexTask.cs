@@ -184,8 +184,13 @@ public class ReindexTask : IScheduledTask
         {
             _embeddings.BeginCacheRetention();
 
-            _logger.LogInformation("Resetting Meilisearch index");
-            await _client.ResetIndexAsync(cancellationToken).ConfigureAwait(false);
+            // Built beside the live index, which keeps answering searches until the swap at the end.
+            // The name is logged so the Meilisearch side of a long run is followable.
+            var target = await _client.BeginRebuildAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Rebuilding into Meilisearch index {IndexName}; searches keep using {LiveIndexName} until it is finished",
+                target,
+                configuration?.IndexName);
             progress.Report(2);
 
             // Snapshot the id set up front and page over that rather than over StartIndex/Limit.
@@ -200,7 +205,7 @@ public class ReindexTask : IScheduledTask
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to enumerate library items; aborting reindex. The index is now empty - re-run this task");
+                _logger.LogError(ex, "Failed to enumerate library items; aborting reindex - re-run this task");
                 return;
             }
 
@@ -382,9 +387,8 @@ public class ReindexTask : IScheduledTask
                     taskUids.Count);
             }
 
-            progress.Report(100);
             _logger.LogInformation(
-                "Meilisearch reindex complete. Indexed {IndexedCount} items, skipped {SkippedCount} items, "
+                "Meilisearch reindex finished. Indexed {IndexedCount} items, skipped {SkippedCount} items, "
                 + "{ErrorCount} errors in {BatchCount} batches ({TaskCount} Meilisearch tasks){Embedding}",
                 indexedCount,
                 skippedCount,
@@ -393,20 +397,26 @@ public class ReindexTask : IScheduledTask
                 taskUids.Count,
                 reporter.DescribeRun());
 
+            if (abortedEarly || taskFailures > 0)
+            {
+                _logger.LogError(
+                    "Meilisearch reindex did not complete cleanly - re-run this task. The half-built index was "
+                    + "discarded, searches keep using the previous one, and the incremental sync watermark was "
+                    + "left unchanged");
+            }
+            else
+            {
+                // Only now, with every document accepted, does the rebuild become the live index.
+                await _client.CommitRebuildAsync(cancellationToken).ConfigureAwait(false);
+                completedCleanly = true;
+            }
+
+            progress.Report(100);
+
             // Anchor the incremental task's watermark so it doesn't re-index everything (or fall
             // back to the 24h heuristic) on its next run. We use the pre-work timestamp so any
             // items modified during the reindex still get picked up.
             var plugin = Plugin.Instance;
-            if (abortedEarly || taskFailures > 0)
-            {
-                _logger.LogError(
-                    "Meilisearch reindex did not complete cleanly, so the index is incomplete - re-run this task. The incremental sync watermark was left unchanged");
-            }
-            else
-            {
-                completedCleanly = true;
-            }
-
             if (completedCleanly && plugin is not null)
             {
                 plugin.Configuration.LastIncrementalReindexUtc = runStart;
@@ -420,6 +430,13 @@ public class ReindexTask : IScheduledTask
         }
         finally
         {
+            // A run that was cancelled or threw leaves a half-built staging index behind; the live
+            // one has been serving the whole time and stays as it is.
+            if (!completedCleanly)
+            {
+                await _client.AbandonRebuildAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
             try
             {
                 await _indexService.ResumeAsync(CancellationToken.None).ConfigureAwait(false);
