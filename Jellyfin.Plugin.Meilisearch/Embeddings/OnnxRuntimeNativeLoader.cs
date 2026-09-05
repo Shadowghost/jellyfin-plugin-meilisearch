@@ -50,6 +50,8 @@ internal static class OnnxRuntimeNativeLoader
                 NativeLibrary.SetDllImportResolver(
                     typeof(InferenceSession).Assembly,
                     (name, assembly, searchPath) => Resolve(name, logger));
+
+                OrtEnv.DisableDllImportResolver = true;
             }
 #pragma warning disable CA1031 // A resolver already installed by someone else is not fatal.
             catch (Exception ex)
