@@ -297,10 +297,12 @@ deleted: the embedder and the vectors stay in Meilisearch, the vector cache stay
 stays downloaded and every setting is kept, so ticking it again comes back to the same model, the
 same tuning and an index that still has its vectors.
 
-Items added or edited while it is off are written without a vector, so **Rebuild Meilisearch Index**
-is what fills those gaps afterwards - re-uploading from the vector cache rather than re-embedding.
-Selecting a *different* model is the one change that does drop the stored vectors, because vectors
-from one model mean nothing to another.
+What the switch does cost is the items added or edited while it is off. Each is written as a whole
+document without a vector, and nothing revisits it afterwards - the incremental sync only looks at
+items modified since its own last run. The plugin says so in the log when semantic search comes back
+on; **Rebuild Meilisearch Index** fills the gaps, re-uploading from the vector cache rather than
+re-embedding. Selecting a *different* model is the one change that does drop the stored vectors,
+because vectors from one model mean nothing to another.
 
 ### Freeing the memory again
 

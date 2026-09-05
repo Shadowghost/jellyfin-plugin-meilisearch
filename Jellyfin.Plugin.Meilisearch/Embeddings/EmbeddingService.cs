@@ -70,6 +70,7 @@ public sealed class EmbeddingService : IHostedService, IDisposable
     private long _queryEmbeddingCount;
     private double _averageQueryEmbeddingMilliseconds;
     private bool _warnedSemanticRatio;
+    private bool _semanticEnabled;
     private bool _disposed;
 
     /// <summary>
@@ -279,6 +280,10 @@ public sealed class EmbeddingService : IHostedService, IDisposable
         {
             plugin.ConfigurationChanged += _configurationChangedHandler;
         }
+
+        // Seeded here so the first configuration save is compared against how the server started,
+        // and only a genuine off-to-on switch reports the vectors missed in between.
+        _semanticEnabled = Configuration.EnableSemanticSearch;
 
         if (Configuration.EnableSemanticSearch)
         {
@@ -1068,6 +1073,9 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
     private void OnConfigurationChanged(object? sender, BasePluginConfiguration configuration)
     {
+        var wasEnabled = _semanticEnabled;
+        _semanticEnabled = Configuration.EnableSemanticSearch;
+
         if (!Configuration.EnableSemanticSearch)
         {
             if (_embedder is not null)
@@ -1080,6 +1088,11 @@ public sealed class EmbeddingService : IHostedService, IDisposable
             return;
         }
 
+        if (!wasEnabled)
+        {
+            ReportVectorsMissedWhileDisabled();
+        }
+
         // The ratio may have moved either side of the crossover, so let the warning fire again.
         lock (_queryVectorGate)
         {
@@ -1088,6 +1101,41 @@ public sealed class EmbeddingService : IHostedService, IDisposable
 
         // Re-initialize on a background task: this runs on the caller's config-save request.
         StartBackgroundInitialization();
+    }
+
+    /// <summary>
+    /// Reports the holes semantic search leaves in the index while it is switched off.
+    /// </summary>
+    /// <remarks>
+    /// Switching off leaves the embedder and the stored vectors in Meilisearch, so most of the index
+    /// is still usable on the way back on. What is not is every item added or edited in the meantime:
+    /// each was written as a whole document without its <c>_vectors</c>, and nothing comes back for
+    /// them - the incremental sync only visits items modified since its own last run, which has moved
+    /// on since. They stay keyword-only until a rebuild, and silently so unless it is said here.
+    /// </remarks>
+    private void ReportVectorsMissedWhileDisabled()
+    {
+        var indexed = Configuration.IndexedEmbeddingModelId;
+        if (string.IsNullOrEmpty(indexed))
+        {
+            // The index never held vectors, so nothing was missed: enabling semantic search asks for
+            // a rebuild anyway.
+            return;
+        }
+
+        if (!string.Equals(indexed, ActiveModel.IndexIdentity, StringComparison.Ordinal))
+        {
+            // A different model was selected in the meantime, which invalidates every stored vector
+            // rather than leaving gaps between them. The stale-model warning covers that, and saying
+            // the index still holds usable vectors on top of it would only mislead.
+            return;
+        }
+
+        _logger.LogInformation(
+            "Semantic search is back on and the index still holds its vectors from {IndexedModel}. Items added or "
+            + "edited while it was off were indexed without one and stay keyword-only until you run the "
+            + "'Rebuild Meilisearch Index' task, which re-uploads from the vector cache instead of re-embedding",
+            indexed);
     }
 
     private void StartBackgroundInitialization()
