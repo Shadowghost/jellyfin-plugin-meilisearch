@@ -117,9 +117,10 @@
                     <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
                         While this is off, nothing about embeddings is loaded, downloaded or computed, and the
                         settings below are hidden rather than gone - turning it back on comes back to the same
-                        model and the same tuning. Meilisearch's embedder is dropped along with the stored
-                        vectors, so nothing stale is left behind and the index space comes back; the vector
-                        cache on disk survives, so re-enabling costs a rebuild but not the inference.
+                        model and the same tuning. Nothing is deleted either: the index keeps its vectors and the
+                        cache keeps its own, so re-enabling costs neither a re-embed nor a re-upload. Items added
+                        or edited while it is off are indexed without a vector though, and only a rebuild fills
+                        those gaps.
                     </div>
                     <div id="semanticSettings">
                         <div class="selectContainer">

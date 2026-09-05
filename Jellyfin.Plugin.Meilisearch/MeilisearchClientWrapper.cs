@@ -1399,17 +1399,33 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Registers or removes the vector field depending on whether semantic search is enabled.
+    /// Registers the vector field when semantic search is on, and leaves the index alone when it is off.
     /// </summary>
     /// <returns><c>false</c> when a change was attempted and failed, so the caller leaves the
     /// settings uncached and the next index access tries again.</returns>
     /// <remarks>
     /// Registered as <c>userProvided</c>: the plugin embeds locally and ships vectors with each
-    /// document, so Meilisearch needs no embedding service or network access of its own. Removing the
-    /// embedder also drops the stored vectors, which is what reclaims the space.
+    /// document, so Meilisearch needs no embedding service or network access of its own.
+    /// <para>
+    /// Switching semantic search off deliberately leaves the embedder and the stored vectors where
+    /// they are. Dropping an embedder drops its vectors with it, and a checkbox is no reason to
+    /// discard what a rebuild spent hours producing: someone turning the feature off to compare
+    /// rankings, or while a broken ONNX Runtime is sorted out, gets it back by ticking the box
+    /// again. Vectors do go missing while it is off, since every document is written as a whole
+    /// replacement without its <c>_vectors</c> - that is a gap to fill with a rebuild, and
+    /// <see cref="EmbeddingService"/> says so on the way back on, not a reason to empty the index
+    /// up front. A model change is the one case that does drop them, in
+    /// <see cref="RemoveStaleEmbeddersAsync"/>, because vectors from another model are unusable
+    /// rather than merely missing.
+    /// </para>
     /// </remarks>
     private async Task<bool> ConfigureEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
     {
+        if (!Configuration.EnableSemanticSearch)
+        {
+            return true;
+        }
+
         Dictionary<string, Embedder> existing;
         try
         {
@@ -1433,37 +1449,25 @@ public class MeilisearchClientWrapper : IDisposable
 
         try
         {
-            if (Configuration.EnableSemanticSearch)
-            {
-                await RemoveStaleEmbeddersAsync(index, existing, cancellationToken).ConfigureAwait(false);
+            await RemoveStaleEmbeddersAsync(index, existing, cancellationToken).ConfigureAwait(false);
 
-                await index.UpdateEmbeddersAsync(
-                    new Dictionary<string, Embedder>(StringComparer.Ordinal)
+            await index.UpdateEmbeddersAsync(
+                new Dictionary<string, Embedder>(StringComparer.Ordinal)
+                {
+                    [EmbeddingService.EmbedderName] = new Embedder
                     {
-                        [EmbeddingService.EmbedderName] = new Embedder
-                        {
-                            Source = EmbedderSource.UserProvided,
-                            Dimensions = EmbeddingService.Dimensions,
-                            BinaryQuantized = Configuration.BinaryQuantizeVectors
-                        }
-                    },
-                    cancellationToken).ConfigureAwait(false);
+                        Source = EmbedderSource.UserProvided,
+                        Dimensions = EmbeddingService.Dimensions,
+                        BinaryQuantized = Configuration.BinaryQuantizeVectors
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
 
-                _logger.LogInformation(
-                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
-                    EmbeddingService.EmbedderName,
-                    EmbeddingService.Dimensions,
-                    Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
-                return true;
-            }
-
-            if (existing is { Count: > 0 })
-            {
-                _logger.LogInformation("Semantic search is off; removing the Meilisearch embedder and its stored vectors");
-                await index.ResetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            ForgetIndexedEmbeddingModel();
+            _logger.LogInformation(
+                "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
+                EmbeddingService.EmbedderName,
+                EmbeddingService.Dimensions,
+                Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1479,27 +1483,6 @@ public class MeilisearchClientWrapper : IDisposable
             return false;
         }
 #pragma warning restore CA1031
-    }
-
-    /// <summary>
-    /// Records that the index no longer holds vectors, so re-enabling semantic search does not look
-    /// like an index that was already built with the selected model.
-    /// </summary>
-    /// <remarks>
-    /// Dropping the embedder drops the vectors with it. Leaving the model recorded would leave the
-    /// index claiming vectors it no longer has: no warning on the status page, and every semantic
-    /// search silently keyword-only until someone thinks to rebuild.
-    /// </remarks>
-    private void ForgetIndexedEmbeddingModel()
-    {
-        var plugin = Plugin.Instance;
-        if (plugin is null || string.IsNullOrEmpty(plugin.Configuration.IndexedEmbeddingModelId))
-        {
-            return;
-        }
-
-        plugin.Configuration.IndexedEmbeddingModelId = string.Empty;
-        plugin.SaveConfiguration();
     }
 
     /// <summary>
