@@ -163,7 +163,8 @@ After installation, configure the plugin in Jellyfin's admin dashboard under **P
 | Enable Health Monitor | `true` | Periodically pings Meilisearch and pauses sync when unreachable |
 | Health Check Interval (s) | `60` | How often the health monitor runs |
 | Synonyms | (empty) | One per line: `term=alt1,alt2` |
-| Embedding Model | `Off` | Meaning-based matching via a locally run model, or off for keyword-only (see [Semantic Search](#semantic-search)) |
+| Enable Semantic Search | `false` | Meaning-based matching via a locally run model, off for keyword-only (see [Semantic Search](#semantic-search)). Off hides the settings below |
+| Embedding Model | first listed | Which local model does the embedding. Switching needs a rebuild |
 | Download the model automatically | `true` | Fetch the embedding model as soon as semantic search is enabled |
 | Semantic Ratio | `50` | 0 is pure keyword, 100 is pure meaning. Above ~60 a similar item outranks an exact title (see [Tuning](#tuning)) |
 | Minimum Semantic Score | `0` | Score a match has to reach to be returned at all; `0` disables the floor |
@@ -247,7 +248,7 @@ match a whole library.
 
 ## Semantic Search
 
-Off by default. When a model is selected, the plugin embeds each indexed item and each query with
+Off by default. When it is enabled, the plugin embeds each indexed item and each query with
 it - currently [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) - and asks
 Meilisearch for a hybrid keyword + vector search. That finds items whose words never appear in the query:
 
@@ -280,9 +281,10 @@ the vector comparison.
 
 ### Enabling it
 
-1. Pick a model under **Embedding Model** in the plugin configuration and save. With automatic
-   download left on, the model is fetched in the background; otherwise run the **Download Meilisearch
-   Embedding Model** scheduled task. The **Status** panel reports `Ready` when the model is loaded.
+1. Tick **Enable semantic search** in the plugin configuration, pick a model under **Embedding
+   Model** and save. With automatic download left on, the model is fetched in the background;
+   otherwise run the **Download Meilisearch Embedding Model** scheduled task. The **Status** panel
+   reports `Ready` when the model is loaded.
 2. Run **Rebuild Meilisearch Index**. Vectors are written as items are indexed, so documents
    already in the index have none until you rebuild.
 
@@ -290,8 +292,9 @@ Search keeps working normally throughout. Until the model is loaded, and for any
 a vector, queries fall back to pure keyword matching - enabling semantic search never makes search
 unavailable, only gradually better as vectors land.
 
-Setting **Embedding Model** back to *Off* releases the model and removes the embedder from
-Meilisearch, which drops the stored vectors and reclaims the index space.
+Unticking **Enable semantic search** releases the model, hides the settings it governs and removes
+the embedder from Meilisearch, which drops the stored vectors and reclaims the index space. The
+settings themselves are kept, so ticking it again comes back to the same model and tuning.
 
 ### Freeing the memory again
 
