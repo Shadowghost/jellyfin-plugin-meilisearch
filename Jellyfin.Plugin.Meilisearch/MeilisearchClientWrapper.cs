@@ -1272,8 +1272,10 @@ public class MeilisearchClientWrapper : IDisposable
                 return;
             }
 
-            await ConfigureIndexSettingsAsync(index, isNewIndex, cancellationToken).ConfigureAwait(false);
-            _settingsAppliedKey = cacheKey;
+            if (await ConfigureIndexSettingsAsync(index, isNewIndex, cancellationToken).ConfigureAwait(false))
+            {
+                _settingsAppliedKey = cacheKey;
+            }
         }
         finally
         {
@@ -1284,7 +1286,9 @@ public class MeilisearchClientWrapper : IDisposable
     /// <summary>
     /// Configures index settings. These operations are idempotent.
     /// </summary>
-    private async Task ConfigureIndexSettingsAsync(global::Meilisearch.Index index, bool isNewIndex, CancellationToken cancellationToken)
+    /// <returns><c>false</c> when the embedder could not be brought in line with the configuration,
+    /// which leaves the settings uncached so the next index access tries again.</returns>
+    private async Task<bool> ConfigureIndexSettingsAsync(global::Meilisearch.Index index, bool isNewIndex, CancellationToken cancellationToken)
     {
         if (isNewIndex)
         {
@@ -1380,7 +1384,7 @@ public class MeilisearchClientWrapper : IDisposable
         // Restrict displayed attributes to what a search actually consumes.
         await index.UpdateDisplayedAttributesAsync(["id", "itemType"], cancellationToken).ConfigureAwait(false);
 
-        await ConfigureEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
+        var embeddersConfigured = await ConfigureEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
 
         // Apply synonyms from configuration.
         var lastSettingsTask = await index.UpdateSynonymsAsync(ParseSynonyms(Configuration.Synonyms), cancellationToken).ConfigureAwait(false);
@@ -1390,50 +1394,81 @@ public class MeilisearchClientWrapper : IDisposable
                 .WaitForTaskAsync(lastSettingsTask.TaskUid, TaskWaitTimeoutMs, TaskWaitIntervalMs, cancellationToken)
                 .ConfigureAwait(false);
         }
+
+        return embeddersConfigured;
     }
 
     /// <summary>
-    /// Registers or removes the vector field depending on whether semantic search is enabled.
+    /// Registers the vector field when semantic search is on, and leaves the index alone when it is off.
     /// </summary>
+    /// <returns><c>false</c> when a change was attempted and failed, so the caller leaves the
+    /// settings uncached and the next index access tries again.</returns>
     /// <remarks>
     /// Registered as <c>userProvided</c>: the plugin embeds locally and ships vectors with each
-    /// document, so Meilisearch needs no embedding service or network access of its own. Removing the
-    /// embedder also drops the stored vectors, which is what reclaims the space.
+    /// document, so Meilisearch needs no embedding service or network access of its own.
+    /// <para>
+    /// Switching semantic search off deliberately leaves the embedder and the stored vectors where
+    /// they are. Dropping an embedder drops its vectors with it, and a checkbox is no reason to
+    /// discard what a rebuild spent hours producing: someone turning the feature off to compare
+    /// rankings, or while a broken ONNX Runtime is sorted out, gets it back by ticking the box
+    /// again. Vectors do go missing while it is off, since every document is written as a whole
+    /// replacement without its <c>_vectors</c> - that is a gap to fill with a rebuild, and
+    /// <see cref="EmbeddingService"/> says so on the way back on, not a reason to empty the index
+    /// up front. A model change is the one case that does drop them, in
+    /// <see cref="RemoveStaleEmbeddersAsync"/>, because vectors from another model are unusable
+    /// rather than merely missing.
+    /// </para>
     /// </remarks>
-    private async Task ConfigureEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
+    private async Task<bool> ConfigureEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
     {
+        if (!Configuration.EnableSemanticSearch)
+        {
+            return true;
+        }
+
+        Dictionary<string, Embedder> existing;
         try
         {
-            if (Configuration.EnableSemanticSearch)
-            {
-                await RemoveStaleEmbeddersAsync(index, cancellationToken).ConfigureAwait(false);
+            existing = await index.GetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#pragma warning disable CA1031 // Vector support is optional; keyword search must survive its absence.
+        catch (Exception ex)
+        {
+            // Reported as configured on purpose: a server without the setting has nothing to retry,
+            // and saying otherwise would reapply every index setting on every single access.
+            _logger.LogWarning(
+                ex,
+                "Could not read the Meilisearch embedder settings. Vector search needs Meilisearch 1.10 or newer; keyword search is unaffected");
+            return true;
+        }
+#pragma warning restore CA1031
 
-                await index.UpdateEmbeddersAsync(
-                    new Dictionary<string, Embedder>(StringComparer.Ordinal)
+        try
+        {
+            await RemoveStaleEmbeddersAsync(index, existing, cancellationToken).ConfigureAwait(false);
+
+            await index.UpdateEmbeddersAsync(
+                new Dictionary<string, Embedder>(StringComparer.Ordinal)
+                {
+                    [EmbeddingService.EmbedderName] = new Embedder
                     {
-                        [EmbeddingService.EmbedderName] = new Embedder
-                        {
-                            Source = EmbedderSource.UserProvided,
-                            Dimensions = EmbeddingService.Dimensions,
-                            BinaryQuantized = Configuration.BinaryQuantizeVectors
-                        }
-                    },
-                    cancellationToken).ConfigureAwait(false);
+                        Source = EmbedderSource.UserProvided,
+                        Dimensions = EmbeddingService.Dimensions,
+                        BinaryQuantized = Configuration.BinaryQuantizeVectors
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
 
-                _logger.LogInformation(
-                    "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
-                    EmbeddingService.EmbedderName,
-                    EmbeddingService.Dimensions,
-                    Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
-                return;
-            }
-
-            var existing = await index.GetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
-            if (existing is { Count: > 0 })
-            {
-                _logger.LogInformation("Semantic search is off; removing the Meilisearch embedder and its stored vectors");
-                await index.ResetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
-            }
+            _logger.LogInformation(
+                "Registered Meilisearch embedder {EmbedderName} ({Dimensions} dimensions, {Storage})",
+                EmbeddingService.EmbedderName,
+                EmbeddingService.Dimensions,
+                Configuration.BinaryQuantizeVectors ? "binary-quantized" : "full precision");
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1444,7 +1479,8 @@ public class MeilisearchClientWrapper : IDisposable
         {
             _logger.LogWarning(
                 ex,
-                "Could not configure the Meilisearch embedder. Vector search needs Meilisearch 1.10 or newer; keyword search is unaffected");
+                "Could not configure the Meilisearch embedder; the next index access tries again. Keyword search is unaffected");
+            return false;
         }
 #pragma warning restore CA1031
     }
@@ -1457,9 +1493,11 @@ public class MeilisearchClientWrapper : IDisposable
     /// hybrid search naming the new embedder would silently skip every document that only has old
     /// ones. Dropping them leaves the index consistently vector-less until the rebuild.
     /// </remarks>
-    private async Task RemoveStaleEmbeddersAsync(global::Meilisearch.Index index, CancellationToken cancellationToken)
+    private async Task RemoveStaleEmbeddersAsync(
+        global::Meilisearch.Index index,
+        Dictionary<string, Embedder> existing,
+        CancellationToken cancellationToken)
     {
-        var existing = await index.GetEmbeddersAsync(cancellationToken).ConfigureAwait(false);
         if (existing is not { Count: > 0 })
         {
             return;

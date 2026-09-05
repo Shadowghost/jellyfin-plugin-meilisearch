@@ -292,9 +292,15 @@ Search keeps working normally throughout. Until the model is loaded, and for any
 a vector, queries fall back to pure keyword matching - enabling semantic search never makes search
 unavailable, only gradually better as vectors land.
 
-Unticking **Enable semantic search** releases the model, hides the settings it governs and removes
-the embedder from Meilisearch, which drops the stored vectors and reclaims the index space. The
-settings themselves are kept, so ticking it again comes back to the same model and tuning.
+Unticking **Enable semantic search** releases the model and hides the settings it governs. Nothing is
+deleted: the embedder and the vectors stay in Meilisearch, the vector cache stays on disk, the model
+stays downloaded and every setting is kept, so ticking it again comes back to the same model, the
+same tuning and an index that still has its vectors.
+
+Items added or edited while it is off are written without a vector, so **Rebuild Meilisearch Index**
+is what fills those gaps afterwards - re-uploading from the vector cache rather than re-embedding.
+Selecting a *different* model is the one change that does drop the stored vectors, because vectors
+from one model mean nothing to another.
 
 ### Freeing the memory again
 
