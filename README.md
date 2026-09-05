@@ -297,10 +297,12 @@ deleted: the embedder and the vectors stay in Meilisearch, the vector cache stay
 stays downloaded and every setting is kept, so ticking it again comes back to the same model, the
 same tuning and an index that still has its vectors.
 
-Items added or edited while it is off are written without a vector, so **Rebuild Meilisearch Index**
-is what fills those gaps afterwards - re-uploading from the vector cache rather than re-embedding.
-Selecting a *different* model is the one change that does drop the stored vectors, because vectors
-from one model mean nothing to another.
+What the switch does cost is the items added or edited while it is off. Each is written as a whole
+document without a vector, and nothing revisits it afterwards - the incremental sync only looks at
+items modified since its own last run. The plugin says so in the log when semantic search comes back
+on; **Rebuild Meilisearch Index** fills the gaps, re-uploading from the vector cache rather than
+re-embedding. Selecting a *different* model is the one change that does drop the stored vectors,
+because vectors from one model mean nothing to another.
 
 ### Freeing the memory again
 
@@ -423,8 +425,8 @@ reporting success, and pauses real-time sync while running so incoming events do
 **The live index is never emptied.** The task builds into a second index named after yours with
 `_rebuild` appended and swaps the two in a single Meilisearch operation once every document has been
 accepted, then deletes what it replaced. Searches are answered from the old index until the swap and
-from the new one after it, never from an empty one - which matters because a rebuild of a large
-library takes a while. A run that is cancelled or fails drops the half-built index and leaves the old
+from the new one after it, never from an empty one - which matters because a rebuild with semantic
+search on takes hours. A run that is cancelled or fails drops the half-built index and leaves the old
 one serving; the next rebuild starts from a fresh staging index either way.
 
 Two consequences worth knowing: Meilisearch needs room for both copies until the swap, and the
@@ -526,8 +528,8 @@ again; nothing is lost either way.
 | Status shows `Released from memory` | Someone pressed **Unload Model**, or did on a previous page visit. It loads again on the next reindex, the next configuration save, or a restart. |
 | **Unload Model** says a reindex is running | Deliberate - see [Freeing the memory again](#freeing-the-memory-again). Cancel the task on the Scheduled Tasks page if you mean it, or wait. |
 | Vectors look wrong and a rebuild keeps reusing them | Press **Clear Vector Cache**, then run **Rebuild Meilisearch Index**. |
-| Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. Each model caches into its own subdirectory there, so an old model's cache can be deleted on its own. |
 | Meilisearch holds an index named `<yours>_rebuild` | A rebuild was interrupted. It is harmless; the next rebuild deletes it before it starts, or you can delete it yourself. |
+| Vector cache disk usage is too high | Lower **Cache Size Limit**, or untick **Cache computed vectors on disk** and delete `meilisearch-embedding-cache` from Jellyfin's data directory. Each model caches into its own subdirectory there, so an old model's cache can be deleted on its own. |
 
 ## REST API
 
