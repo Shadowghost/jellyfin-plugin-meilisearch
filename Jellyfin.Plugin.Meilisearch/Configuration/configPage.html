@@ -110,166 +110,176 @@
                         server - but it downloads several hundred megabytes once and then costs CPU time for every
                         indexed item. Leave it off unless you want that trade.
                     </div>
-                    <div class="selectContainer">
-                        <select is="emby-select" id="embeddingModel" label="Embedding Model">
-                            <option value="">Off - keyword search only</option>
-                        </select>
-                        <div class="fieldDescription">
-                            While this is off, nothing about embeddings is loaded or downloaded. Each model keeps its
-                            own download and its own vector cache, so switching away from one and back again costs
-                            neither - but the index has to be rebuilt after every switch, because vectors from one
-                            model mean nothing to another.
-                        </div>
-                    </div>
-                    <div id="semanticUnsupportedNotice" class="fieldDescription"
-                         style="display: none; margin-bottom: 1em; padding: 0.75em; border-left: 3px solid #cc3333;">
-                        <strong>This server cannot run a local embedding model.</strong>
-                        <span id="semanticUnsupportedReason"></span>
-                        The settings below have no effect until that is resolved; keyword search is
-                        unaffected. Set <em>Embedding Model</em> back to <em>Off</em> to stop the plugin
-                        retrying on every start.
-                    </div>
                     <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="autoDownloadEmbeddingModel" />
-                        <span>Download the model automatically</span>
+                        <input is="emby-checkbox" type="checkbox" id="enableSemanticSearch" />
+                        <span>Enable semantic search</span>
                     </label>
                     <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
-                        When off, run the <em>Download Meilisearch Embedding Model</em> scheduled task instead.
+                        While this is off, nothing about embeddings is loaded, downloaded or computed, and the
+                        settings below are hidden rather than gone - turning it back on comes back to the same
+                        model and the same tuning. Meilisearch's embedder is dropped along with the stored
+                        vectors, so nothing stale is left behind and the index space comes back; the vector
+                        cache on disk survives, so re-enabling costs a rebuild but not the inference.
                     </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="semanticRatio" min="0" max="100" step="1" label="Semantic Ratio (0-100)" />
-                        <div class="fieldDescription">
-                            0 is pure keyword search &mdash; the query is then not embedded at all &mdash; and 100 is
-                            pure meaning. Meilisearch picks one side per result rather than blending them, comparing
-                            <code>keyword&nbsp;&times;&nbsp;(1&nbsp;&minus;&nbsp;ratio)</code> against
-                            <code>similarity&nbsp;&times;&nbsp;ratio</code>. The catch is the scale: a keyword hit on a
-                            title scores 1.0, but similarity is reported as <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code>,
-                            so an item with nothing to do with your query still scores around 0.7.
+                    <div id="semanticSettings">
+                        <div class="selectContainer">
+                            <select is="emby-select" id="embeddingModel" label="Embedding Model"></select>
+                            <div class="fieldDescription">
+                                Each model keeps its own download and its own vector cache, so switching away from one
+                                and back again costs neither - but the index has to be rebuilt after every switch,
+                                because vectors from one model mean nothing to another.
+                            </div>
+                        </div>
+                        <div id="semanticUnsupportedNotice" class="fieldDescription"
+                             style="display: none; margin-bottom: 1em; padding: 0.75em; border-left: 3px solid #cc3333;">
+                            <strong>This server cannot run a local embedding model.</strong>
+                            <span id="semanticUnsupportedReason"></span>
+                            The settings below have no effect until that is resolved; keyword search is
+                            unaffected. Untick <em>Enable semantic search</em> to stop the plugin retrying on
+                            every start.
+                        </div>
+                        <label class="checkboxContainer">
+                            <input is="emby-checkbox" type="checkbox" id="autoDownloadEmbeddingModel" />
+                            <span>Download the model automatically</span>
+                        </label>
+                        <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                            When off, run the <em>Download Meilisearch Embedding Model</em> scheduled task instead.
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="semanticRatio" min="0" max="100" step="1" label="Semantic Ratio (0-100)" />
+                            <div class="fieldDescription">
+                                0 is pure keyword search &mdash; the query is then not embedded at all &mdash; and 100 is
+                                pure meaning. Meilisearch picks one side per result rather than blending them, comparing
+                                <code>keyword&nbsp;&times;&nbsp;(1&nbsp;&minus;&nbsp;ratio)</code> against
+                                <code>similarity&nbsp;&times;&nbsp;ratio</code>. The catch is the scale: a keyword hit on a
+                                title scores 1.0, but similarity is reported as <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code>,
+                                so an item with nothing to do with your query still scores around 0.7.
+                                <br /><br />
+                                <strong>That puts the tipping point just under 60.</strong> Above it, every vaguely similar
+                                item outranks an exact title match, and typing the first words of a title pushes that title
+                                hundreds of results down. At 50 the keyword hits stay on top and the vector matches fill in
+                                underneath, which is what you usually want. Default: 50
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="minimumSemanticScore" min="0" max="100" step="1" label="Minimum Semantic Score (0-100)" />
+                            <div class="fieldDescription">
+                                How similar a result has to be before meaning-based search will return it. A vector search
+                                has no idea of &ldquo;no match&rdquo;: every item has some similarity to the query, so a
+                                query that matches nothing still fills the page. On the
+                                <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code> scale above, unrelated items sit near 0.7,
+                                so a floor only starts to bite around 72&ndash;78 &mdash; measured on a 330k-item library,
+                                where rank 100 of a vector search scored 0.70. Meilisearch applies a single threshold to
+                                both halves of a hybrid search, so this also raises the bar for keyword hits (the higher of
+                                this and <em>Minimum Match Score</em> wins); set it too high and weak keyword matches
+                                disappear with the noise. 0 disables the floor. Default: 0
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
+                            <div class="fieldDescription">
+                                How much of each item's metadata is embedded. Higher is slower. Default: 256
+                                <br /><br />
+                                <strong>Changing this discards the vector cache and needs a full rebuild.</strong> A vector
+                                computed under one budget is not the one the next budget produces, so the cache starts over
+                                rather than handing the old vectors back, and the index keeps what it has until you rebuild.
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />
+                            <div class="fieldDescription">
+                                0 uses half your CPU cores, leaving headroom for transcoding. Only applies to the CPU -
+                                a GPU provider schedules its own work. Default: 0
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="text" id="embeddingOnnxRuntimePath" label="ONNX Runtime Library Path" />
+                            <div class="fieldDescription">
+                                Leave empty unless you want to run embedding on a GPU. The plugin uses the fastest
+                                execution provider the loaded ONNX Runtime offers and falls back to the CPU, and the
+                                build shipped here is CPU-only.
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="embeddingIdleUnloadMinutes" min="0" step="1" label="Release Model When Idle (minutes, 0 = never)" />
+                            <div class="fieldDescription">
+                                The model is the largest thing this plugin keeps in memory. Releasing it after a
+                                quiet spell hands that memory back to playback and transcoding, at the cost of the
+                                next search: it is answered on keywords alone while the model reloads, and searches
+                                after it are semantic again. Default: 0
+                            </div>
+                        </div>
+                        <label class="checkboxContainer">
+                            <input is="emby-checkbox" type="checkbox" id="binaryQuantizeVectors" />
+                            <span>Compress stored vectors (binary quantization)</span>
+                        </label>
+                        <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                            Stores vectors at one bit per dimension instead of a 32-bit float: about 32&nbsp;times smaller,
+                            which keeps them in memory instead of read from disk on every search - seconds on a cold index.
+                            The trade is some ranking precision in the vector half of a search, and what it swaps in are
+                            near-ties, within roughly 1.5% of the similarity of what they replace. Keyword matching is
+                            exact either way.
                             <br /><br />
-                            <strong>That puts the tipping point just under 60.</strong> Above it, every vaguely similar
-                            item outranks an exact title match, and typing the first words of a title pushes that title
-                            hundreds of results down. At 50 the keyword hits stay on top and the vector matches fill in
-                            underneath, which is what you usually want. Default: 50
+                            Turning it back off needs a rebuild, since Meilisearch discards the full vectors as it
+                            compresses them - but that rebuild reads from the vector cache below, which always keeps full
+                            precision, so it re-uploads rather than re-running the model.
                         </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="minimumSemanticScore" min="0" max="100" step="1" label="Minimum Semantic Score (0-100)" />
-                        <div class="fieldDescription">
-                            How similar a result has to be before meaning-based search will return it. A vector search
-                            has no idea of &ldquo;no match&rdquo;: every item has some similarity to the query, so a
-                            query that matches nothing still fills the page. On the
-                            <code>(cosine&nbsp;+&nbsp;1)&nbsp;/&nbsp;2</code> scale above, unrelated items sit near 0.7,
-                            so a floor only starts to bite around 72&ndash;78 &mdash; measured on a 330k-item library,
-                            where rank 100 of a vector search scored 0.70. Meilisearch applies a single threshold to
-                            both halves of a hybrid search, so this also raises the bar for keyword hits (the higher of
-                            this and <em>Minimum Match Score</em> wins); set it too high and weak keyword matches
-                            disappear with the noise. 0 disables the floor. Default: 0
+                        <label class="checkboxContainer">
+                            <input is="emby-checkbox" type="checkbox" id="enableEmbeddingCache" />
+                            <span>Cache computed vectors on disk</span>
+                        </label>
+                        <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
+                            A rebuild re-embeds the whole library, and unchanged metadata gives an identical vector - the
+                            cache turns that back into a file read instead of hours of CPU. Costs about 4&nbsp;KB per item,
+                            kept under Jellyfin's data directory. Leave this on unless disk space is tight.
                         </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="embeddingMaxTokens" min="16" max="8192" step="16" label="Max Tokens per Item" />
-                        <div class="fieldDescription">
-                            How much of each item's metadata is embedded. Higher is slower. Default: 256
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="embeddingCacheMaxEntries" min="0" step="1000" label="Cache Size Limit (items, 0 = unlimited)" />
+                            <div class="fieldDescription">
+                                A rebuild already drops cached vectors it no longer needs, so the cache follows your
+                                library's size on its own. Set a limit only to cap disk use. Default: 0 (unlimited)
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="text" id="embeddingModelPath" label="Model Directory (optional)" />
+                            <div class="fieldDescription">
+                                Leave empty to store models under Jellyfin's data directory. Each model gets its own
+                                subdirectory.
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 1em;">
+                            <button is="emby-button" type="button" id="unloadModelBtn" class="raised"><span>Unload Model</span></button>
+                            <span id="unloadModelStatus" style="margin-left: 1em;"></span>
+                        </div>
+                        <div class="fieldDescription" style="margin-bottom: 1em;">
+                            Gives back the 1-2&nbsp;GB the model holds without turning semantic search off, for a server
+                            that is not indexing right now. It stays unloaded until the next reindex, the next time you
+                            save this page, or a restart - searches run keyword-only in the meantime, and items synced
+                            while it is unloaded get no vector until the next rebuild.
                             <br /><br />
-                            <strong>Changing this discards the vector cache and needs a full rebuild.</strong> A vector
-                            computed under one budget is not the one the next budget produces, so the cache starts over
-                            rather than handing the old vectors back, and the index keeps what it has until you rebuild.
+                            Refused while a reindex is running: releasing the model underneath one would leave every item
+                            it still has to index without a vector, and a rebuild is meant to embed all of them or none.
+                            Cancel the task on the Scheduled Tasks page first if you mean it.
                         </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="embeddingThreads" min="0" step="1" label="Inference Threads (0 = auto)" />
-                        <div class="fieldDescription">
-                            0 uses half your CPU cores, leaving headroom for transcoding. Only applies to the CPU -
-                            a GPU provider schedules its own work. Default: 0
+                        <div style="margin-bottom: 1em;">
+                            <button is="emby-button" type="button" id="clearVectorCacheBtn" class="raised"><span>Clear Vector Cache</span></button>
+                            <span id="clearVectorCacheStatus" style="margin-left: 1em;"></span>
                         </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="text" id="embeddingOnnxRuntimePath" label="ONNX Runtime Library Path" />
-                        <div class="fieldDescription">
-                            Leave empty unless you want to run embedding on a GPU. The plugin uses the fastest
-                            execution provider the loaded ONNX Runtime offers and falls back to the CPU, and the
-                            build shipped here is CPU-only.
+                        <div class="fieldDescription" style="margin-bottom: 1em;">
+                            Throws away every cached vector so the next rebuild computes them from scratch. Changing the
+                            model or the token budget already does this on its own &mdash; reach for this when the vectors
+                            look wrong rather than merely stale, since every one it drops costs a forward pass to produce
+                            again, which is hours for a large library. The index keeps the vectors it already holds until
+                            you rebuild. Refused while a reindex is running.
                         </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="embeddingIdleUnloadMinutes" min="0" step="1" label="Release Model When Idle (minutes, 0 = never)" />
-                        <div class="fieldDescription">
-                            The model is the largest thing this plugin keeps in memory. Releasing it after a
-                            quiet spell hands that memory back to playback and transcoding, at the cost of the
-                            next search: it is answered on keywords alone while the model reloads, and searches
-                            after it are semantic again. Default: 0
+                        <div class="fieldDescription" style="margin-bottom: 1em;">
+                            <strong>These settings only reach the index through a rebuild.</strong> Turning semantic search
+                            on, switching model, changing <em>Max Tokens per Item</em> or toggling
+                            <em>Compress stored vectors</em> all change what is stored per document, and documents already
+                            in the index keep what they have until you run &ldquo;Rebuild Meilisearch Index&rdquo;.
+                            <em>Semantic Ratio</em> and the two score floors are applied per search and take effect as soon
+                            as you save.
                         </div>
-                    </div>
-                    <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="binaryQuantizeVectors" />
-                        <span>Compress stored vectors (binary quantization)</span>
-                    </label>
-                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
-                        Stores vectors at one bit per dimension instead of a 32-bit float: about 32&nbsp;times smaller,
-                        which keeps them in memory instead of read from disk on every search - seconds on a cold index.
-                        The trade is some ranking precision in the vector half of a search, and what it swaps in are
-                        near-ties, within roughly 1.5% of the similarity of what they replace. Keyword matching is
-                        exact either way.
-                        <br /><br />
-                        Turning it back off needs a rebuild, since Meilisearch discards the full vectors as it
-                        compresses them - but that rebuild reads from the vector cache below, which always keeps full
-                        precision, so it re-uploads rather than re-running the model.
-                    </div>
-                    <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="enableEmbeddingCache" />
-                        <span>Cache computed vectors on disk</span>
-                    </label>
-                    <div class="fieldDescription" style="margin-left: 3em; margin-top: -1em; margin-bottom: 1em;">
-                        A rebuild re-embeds the whole library, and unchanged metadata gives an identical vector - the
-                        cache turns that back into a file read instead of hours of CPU. Costs about 4&nbsp;KB per item,
-                        kept under Jellyfin's data directory. Leave this on unless disk space is tight.
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="number" id="embeddingCacheMaxEntries" min="0" step="1000" label="Cache Size Limit (items, 0 = unlimited)" />
-                        <div class="fieldDescription">
-                            A rebuild already drops cached vectors it no longer needs, so the cache follows your
-                            library's size on its own. Set a limit only to cap disk use. Default: 0 (unlimited)
-                        </div>
-                    </div>
-                    <div class="inputContainer">
-                        <input is="emby-input" type="text" id="embeddingModelPath" label="Model Directory (optional)" />
-                        <div class="fieldDescription">
-                            Leave empty to store models under Jellyfin's data directory. Each model gets its own
-                            subdirectory.
-                        </div>
-                    </div>
-                    <div style="margin-bottom: 1em;">
-                        <button is="emby-button" type="button" id="unloadModelBtn" class="raised"><span>Unload Model</span></button>
-                        <span id="unloadModelStatus" style="margin-left: 1em;"></span>
-                    </div>
-                    <div class="fieldDescription" style="margin-bottom: 1em;">
-                        Gives back the 1-2&nbsp;GB the model holds without turning semantic search off, for a server
-                        that is not indexing right now. It stays unloaded until the next reindex, the next time you
-                        save this page, or a restart - searches run keyword-only in the meantime, and items synced
-                        while it is unloaded get no vector until the next rebuild.
-                        <br /><br />
-                        Refused while a reindex is running: releasing the model underneath one would leave every item
-                        it still has to index without a vector, and a rebuild is meant to embed all of them or none.
-                        Cancel the task on the Scheduled Tasks page first if you mean it.
-                    </div>
-                    <div style="margin-bottom: 1em;">
-                        <button is="emby-button" type="button" id="clearVectorCacheBtn" class="raised"><span>Clear Vector Cache</span></button>
-                        <span id="clearVectorCacheStatus" style="margin-left: 1em;"></span>
-                    </div>
-                    <div class="fieldDescription" style="margin-bottom: 1em;">
-                        Throws away every cached vector so the next rebuild computes them from scratch. Changing the
-                        model or the token budget already does this on its own &mdash; reach for this when the vectors
-                        look wrong rather than merely stale, since every one it drops costs a forward pass to produce
-                        again, which is hours for a large library. The index keeps the vectors it already holds until
-                        you rebuild. Refused while a reindex is running.
-                    </div>
-                    <div class="fieldDescription" style="margin-bottom: 1em;">
-                        <strong>These settings only reach the index through a rebuild.</strong> Turning semantic search
-                        on, switching model, changing <em>Max Tokens per Item</em> or toggling
-                        <em>Compress stored vectors</em> all change what is stored per document, and documents already
-                        in the index keep what they have until you run &ldquo;Rebuild Meilisearch Index&rdquo;.
-                        <em>Semantic Ratio</em> and the two score floors are applied per search and take effect as soon
-                        as you save.
                     </div>
                     <br />
                     <div style="margin-bottom: 1em;">
@@ -384,9 +394,8 @@
                     return;
                 }
 
-                // Everything below the first entry ("Off") is rebuilt from the server's list.
-                while (select.options.length > 1) {
-                    select.remove(1);
+                while (select.options.length > 0) {
+                    select.remove(0);
                 }
 
                 var known = false;
@@ -412,14 +421,25 @@
             }
 
             // Disabled rather than hidden: an admin on an unsupported host still has to be able to
-            // read what is configured, and the model picker is also the off switch, so it stays live.
+            // read what is configured. The off switch sits outside this list and stays live.
             var SEMANTIC_TUNING_CONTROLS = [
+                '#embeddingModel',
                 '#autoDownloadEmbeddingModel', '#semanticRatio', '#minimumSemanticScore', '#embeddingMaxTokens',
                 '#embeddingOnnxRuntimePath',
                 '#embeddingThreads', '#embeddingIdleUnloadMinutes', '#binaryQuantizeVectors',
                 '#enableEmbeddingCache', '#embeddingCacheMaxEntries', '#embeddingModelPath',
                 '#unloadModelBtn'
             ];
+
+            // The settings are hidden rather than disabled while semantic search is off: they are a
+            // third of the page and none of them mean anything until it is on. Their values stay in the
+            // form, so a save while off keeps them for the next time it is on.
+            function applySemanticVisibility() {
+                var settings = document.querySelector('#semanticSettings');
+                if (settings) {
+                    settings.style.display = document.querySelector('#enableSemanticSearch').checked ? '' : 'none';
+                }
+            }
 
             function setSemanticUnsupported(unsupported, reason) {
                 var notice = document.querySelector('#semanticUnsupportedNotice');
@@ -664,15 +684,16 @@
                         var synonymsInput = document.querySelector('#synonyms');
                         synonymsInput.value = config.Synonyms || '';
 
+                        document.querySelector('#enableSemanticSearch').checked = config.EnableSemanticSearch === true;
+                        applySemanticVisibility();
+
                         var configuredModel = config.EmbeddingModelId || '';
                         fillEmbeddingModels(models, configuredModel);
                         var modelSelect = document.querySelector('#embeddingModel');
-                        modelSelect.value = config.EnableSemanticSearch === true ? configuredModel : '';
-                        // Semantic search on but no model resolved: fall back to the first offered one
-                        // rather than showing "Off", which a save would then make true.
-                        if (config.EnableSemanticSearch === true && modelSelect.value === '' && modelSelect.options.length > 1) {
-                            modelSelect.selectedIndex = 1;
-                        } else if (modelSelect.selectedIndex < 0) {
+                        modelSelect.value = configuredModel;
+                        // No model stored, or one this build no longer lists: show the first offered one
+                        // rather than a blank picker, which a save would then store.
+                        if (modelSelect.selectedIndex < 0) {
                             modelSelect.selectedIndex = 0;
                         }
 
@@ -715,11 +736,10 @@
                         config.EnableHealthMonitor = document.querySelector('#enableHealthMonitor').checked;
                         config.HealthCheckIntervalSeconds = parseIntOrDefault(document.querySelector('#healthCheckIntervalSeconds').value, 60);
                         config.Synonyms = document.querySelector('#synonyms').value;
-                        // One control, two settings: the model picker's empty option is the off switch,
-                        // and leaving the stored model alone means turning semantic search off and on
-                        // again comes back to the same one.
+                        config.EnableSemanticSearch = document.querySelector('#enableSemanticSearch').checked;
+                        // An empty picker means the server offered no models at all; leaving the stored
+                        // one alone then means turning semantic search off and on again comes back to it.
                         var selectedModel = document.querySelector('#embeddingModel').value;
-                        config.EnableSemanticSearch = selectedModel !== '';
                         if (selectedModel !== '') {
                             config.EmbeddingModelId = selectedModel;
                         }
@@ -741,6 +761,9 @@
                     e.preventDefault();
                     return false;
                 });
+
+            document.querySelector('#enableSemanticSearch')
+                .addEventListener('change', applySemanticVisibility);
 
             document.querySelector('#testConnectionBtn')
                 .addEventListener('click', function () {
