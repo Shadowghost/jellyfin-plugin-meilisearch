@@ -87,11 +87,10 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the Meilisearch matching strategy: <c>frequency</c>, <c>last</c> or <c>all</c>.
     /// </summary>
     /// <remarks>
-    /// <c>frequency</c> (the default) discards the most common word in the library when a query has
-    /// no exact match; <c>last</c> discards words from the end of the query; <c>all</c> returns only
-    /// documents matching every word, trading recall for precision. <c>frequency</c> requires
-    /// Meilisearch 1.11 or newer - on an older server the plugin notices the rejection once and
-    /// falls back to <see cref="FallbackMatchingStrategy"/> for the rest of the session.
+    /// <c>frequency</c> drops the library's most common word when a query has no exact match,
+    /// <c>last</c> drops words from the end, <c>all</c> requires every word. <c>frequency</c> needs
+    /// Meilisearch 1.11 or newer; older servers fall back to
+    /// <see cref="FallbackMatchingStrategy"/> after the first rejection.
     /// </remarks>
     public string MatchingStrategy { get; set; }
 

@@ -204,11 +204,6 @@ public class MeilisearchDocument
     /// <summary>
     /// Gets or sets the item's file or folder name, so a release name can be searched for directly.
     /// </summary>
-    /// <remarks>
-    /// Deliberately the leaf only, not the full path. Directories above the item repeat the same
-    /// words on everything beneath them ("/mnt/media/Movies"), so indexing them would make a search
-    /// for "movies" match an entire library.
-    /// </remarks>
     [JsonPropertyName("path")]
     public string? Path { get; set; }
 

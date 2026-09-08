@@ -94,10 +94,9 @@ public class MeilisearchClientWrapper : IDisposable
     /// startup, in milliseconds, or null when no search has run yet.
     /// </summary>
     /// <remarks>
-    /// An exponential moving average weighted by <see cref="SearchTimeSmoothingFactor"/>, not a mean
-    /// over all searches: it tracks current behaviour rather than accumulating history. It measures
-    /// only the HTTP call to Meilisearch, so it excludes the time Jellyfin spends loading the matched
-    /// items and filtering them by user access.
+    /// An exponential moving average weighted by <see cref="SearchTimeSmoothingFactor"/>, so it
+    /// tracks current behaviour rather than accumulating history. Measures only the HTTP call to
+    /// Meilisearch, not the time Jellyfin then spends loading and access-filtering items.
     /// </remarks>
     public double? AverageSearchTimeMilliseconds
     {
@@ -400,9 +399,10 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Splits a batch into requests that stay under the server's payload limit. A document carrying a
-    /// 1024-dimension embedding serialises to roughly 12 KB, so a few thousand of them are enough to
-    /// blow past the 100 MB Meilisearch accepts by default and have the whole batch rejected.
+    /// Splits a batch into requests that stay under the server's payload limit. Reindex Batch Size has
+    /// no upper bound, and a document with a long overview and a full set of metadata runs to several
+    /// kilobytes, so a batch can blow past the 100 MB Meilisearch accepts by default and be rejected
+    /// whole.
     /// </summary>
     private static IEnumerable<List<MeilisearchDocument>> SplitForPayloadLimit(List<MeilisearchDocument> documents)
     {
@@ -935,9 +935,8 @@ public class MeilisearchClientWrapper : IDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The operation result.</returns>
     /// <remarks>
-    /// Probing the server version up front would need the <c>version</c> action, which a restricted
-    /// API key does not have, so support is inferred from the first rejection instead. The fallback
-    /// is then remembered for the rest of the connection: exactly one query pays for it.
+    /// Probing the server version needs the <c>version</c> action, which a restricted API key lacks,
+    /// so support is inferred from the first rejection and then remembered for the connection.
     /// </remarks>
     private async Task<T> ExecuteSearchAsync<T>(Func<string, CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
     {
