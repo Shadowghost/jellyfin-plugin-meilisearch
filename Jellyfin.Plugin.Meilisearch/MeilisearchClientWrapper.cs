@@ -38,6 +38,12 @@ public class MeilisearchClientWrapper : IDisposable
     // Quotes, separator, and room for escaping in a JSON string value.
     private const int TextFieldOverheadBytes = 8;
 
+    // "_vectors" key plus the "embeddings"/"regenerate" scaffolding around one embedding.
+    private const int VectorOverheadBytes = 64;
+
+    // One serialised float and its separator, e.g. "-0.052734375,".
+    private const int VectorComponentBytes = 16;
+
     // Weight given to the newest sample in the rolling search-latency average. Low enough that one
     // slow query does not dominate the figure shown on the config page.
     private const double SearchTimeSmoothingFactor = 0.25;
@@ -408,10 +414,9 @@ public class MeilisearchClientWrapper : IDisposable
     }
 
     /// <summary>
-    /// Splits a batch into requests that stay under the server's payload limit. Reindex Batch Size has
-    /// no upper bound, and a document with a long overview and a full set of metadata runs to several
-    /// kilobytes, so a batch can blow past the 100 MB Meilisearch accepts by default and be rejected
-    /// whole.
+    /// Splits a batch into requests that stay under the server's payload limit. A document carrying a
+    /// 1024-dimension embedding serialises to roughly 12 KB, so a few thousand of them are enough to
+    /// blow past the 100 MB Meilisearch accepts by default and have the whole batch rejected.
     /// </summary>
     private static IEnumerable<List<MeilisearchDocument>> SplitForPayloadLimit(List<MeilisearchDocument> documents)
     {
@@ -482,6 +487,14 @@ public class MeilisearchClientWrapper : IDisposable
             foreach (var (key, value) in document.ProviderIds)
             {
                 bytes += TextBytes(key) + TextBytes(value);
+            }
+        }
+
+        if (document.Vectors is not null)
+        {
+            foreach (var (name, vector) in document.Vectors)
+            {
+                bytes += TextBytes(name) + VectorOverheadBytes + ((long)vector.Embeddings.Count * VectorComponentBytes);
             }
         }
 
