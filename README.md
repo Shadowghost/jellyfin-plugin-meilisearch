@@ -188,7 +188,7 @@ They are idempotent, so editing them by hand in Meilisearch will be overwritten.
 | Searchable attributes (in priority order) | `name`, `originalTitle`, `sortName`, `seriesName`, `seasonName`, `albumName`, `artists`, `albumArtists`, `people`, `genres`, `tags`, `studios`, `providerIds.*`, `productionLocations`, `tagline`, `overview`, `path` |
 | Ranking rules | Meilisearch's defaults, then `typeRank`, `sort`, `productionYear`, `communityRating`, `criticRating` - each one breaking ties left by the one before |
 | Typo tolerance | Enabled; 1 typo from 4 characters, 2 typos from 8 |
-| Displayed attributes | `id` only — the provider consumes nothing else, which keeps search responses small |
+| Displayed attributes | `id` and `itemType` - the provider consumes nothing else, which keeps search responses small |
 | Synonyms | Taken from the **Synonyms** setting |
 
 Because `name` outranks `overview`, a title match always beats a plot-summary match, and because
